@@ -7,6 +7,8 @@
 __pycache__/
 *.py[cod]
 
+./.gitignore
+
 # Generated key material
 keys/
 
