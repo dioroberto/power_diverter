@@ -1,0 +1,14 @@
+.pio/
+.pioenvs/
+.piolibdeps/
+
+.vscode/
+
+__pycache__/
+*.py[cod]
+
+# Generated key material
+keys/
+
+ESP32-p1-reader/include/secrets_udp.h
+ESP32-p1-reader/include/secrets.h
