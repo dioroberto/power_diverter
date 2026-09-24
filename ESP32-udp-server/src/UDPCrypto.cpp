@@ -1,4 +1,5 @@
 #include "UDPCrypto.h"
+#include "udp_config.h"
 
 #include <Crypto.h>
 #include <Curve25519.h>
@@ -10,11 +11,17 @@
 
 namespace
 {
-    constexpr char HKDF_INFO[] =
-        "DIONISIOTECH-P1-UDP-v1";
 
-    constexpr size_t HKDF_INFO_SIZE =
-        sizeof(HKDF_INFO) - 1;
+    void secureClean(
+        void* data,
+        size_t size)
+    {
+        volatile uint8_t* p =
+            static_cast<volatile uint8_t*>(data);
+
+        while (size--)
+            *p++ = 0;
+    }
 }
 
 
@@ -55,9 +62,7 @@ bool UDPCrypto::begin(
         strlen(deviceName);
 
     if (nameLength > DEVICE_NAME_SIZE)
-    {
         return false;
-    }
 
     memset(
         deviceName_,
@@ -123,7 +128,7 @@ bool UDPCrypto::deriveSessionKey()
             serverPrivateKey_,
             devicePublicKey_))
     {
-        clean(
+        secureClean(
             sharedSecret,
             sizeof(sharedSecret)
         );
@@ -139,18 +144,18 @@ bool UDPCrypto::deriveSessionKey()
     );
 
     /*
-     * Match the sender exactly.
+     * Must match the sender exactly.
      */
     hkdf.extract(
         sessionKey_,
         sizeof(sessionKey_),
         reinterpret_cast<const uint8_t*>(
-            HKDF_INFO
+            UDPConfig::HKDF_INFO
         ),
-        HKDF_INFO_SIZE
+        strlen(UDPConfig::HKDF_INFO)
     );
 
-    clean(
+    secureClean(
         sharedSecret,
         sizeof(sharedSecret)
     );
@@ -279,7 +284,7 @@ bool UDPCrypto::decrypt(
             tag,
             TAG_SIZE))
     {
-        clean(
+        secureClean(
             plaintext,
             sizeof(plaintext)
         );
@@ -289,7 +294,7 @@ bool UDPCrypto::decrypt(
 
 
     // --------------------------------------------------------
-    // Decode plaintext
+    // Decode metadata
     // --------------------------------------------------------
 
     result.sequence =
@@ -302,18 +307,23 @@ bool UDPCrypto::decrypt(
             plaintext + sizeof(uint64_t)
         );
 
-    result.netPower =
-        readFloatBE(
-            plaintext +
-            sizeof(uint64_t) * 2
-        );
+
+    // --------------------------------------------------------
+    // Decode P1 metrics
+    // --------------------------------------------------------
+
+    memcpy(
+        &result.metrics,
+        plaintext + PLAINTEXT_METADATA_SIZE,
+        sizeof(result.metrics)
+    );
 
 
     // --------------------------------------------------------
-    // Clear sensitive temporary data
+    // Clear sensitive plaintext
     // --------------------------------------------------------
 
-    clean(
+    secureClean(
         plaintext,
         sizeof(plaintext)
     );
@@ -338,36 +348,6 @@ uint64_t UDPCrypto::readUint64BE(
         (static_cast<uint64_t>(source[5]) << 16) |
         (static_cast<uint64_t>(source[6]) << 8)  |
         (static_cast<uint64_t>(source[7]));
-}
-
-
-// ============================================================
-// Read float big endian
-// ============================================================
-
-float UDPCrypto::readFloatBE(
-    const uint8_t* source)
-{
-    static_assert(
-        sizeof(float) == 4,
-        "UDP protocol requires 32-bit float"
-    );
-
-    uint32_t raw =
-        (static_cast<uint32_t>(source[0]) << 24) |
-        (static_cast<uint32_t>(source[1]) << 16) |
-        (static_cast<uint32_t>(source[2]) << 8)  |
-        static_cast<uint32_t>(source[3]);
-
-    float value;
-
-    memcpy(
-        &value,
-        &raw,
-        sizeof(value)
-    );
-
-    return value;
 }
 
 

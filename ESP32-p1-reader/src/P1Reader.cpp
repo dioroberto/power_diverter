@@ -8,11 +8,60 @@
 
 namespace
 {
+    // ========================================================
+    // Energy
+    // ========================================================
+
+    constexpr const char* OBIS_IMPORTED_ENERGY_TARIFF_1 =
+        "1-0:1.8.1";
+
+    constexpr const char* OBIS_IMPORTED_ENERGY_TARIFF_2 =
+        "1-0:1.8.2";
+
+    constexpr const char* OBIS_EXPORTED_ENERGY_TARIFF_1 =
+        "1-0:2.8.1";
+
+    constexpr const char* OBIS_EXPORTED_ENERGY_TARIFF_2 =
+        "1-0:2.8.2";
+
+
+    // ========================================================
+    // Power
+    // ========================================================
+
     constexpr const char* OBIS_IMPORTED_POWER =
         "1-0:1.7.0";
 
     constexpr const char* OBIS_EXPORTED_POWER =
         "1-0:2.7.0";
+
+
+    // ========================================================
+    // Voltage
+    // ========================================================
+
+    constexpr const char* OBIS_VOLTAGE_PHASE_1 =
+        "1-0:32.7.0";
+
+    constexpr const char* OBIS_VOLTAGE_PHASE_2 =
+        "1-0:52.7.0";
+
+    constexpr const char* OBIS_VOLTAGE_PHASE_3 =
+        "1-0:72.7.0";
+
+
+    // ========================================================
+    // Current
+    // ========================================================
+
+    constexpr const char* OBIS_CURRENT_PHASE_1 =
+        "1-0:31.7.0";
+
+    constexpr const char* OBIS_CURRENT_PHASE_2 =
+        "1-0:51.7.0";
+
+    constexpr const char* OBIS_CURRENT_PHASE_3 =
+        "1-0:71.7.0";
 }
 
 
@@ -49,6 +98,7 @@ void P1Reader::begin()
         txPin_
     );
 
+
     // --------------------------------------------------------
     // P1 uses inverted TTL logic.
     // Invert RX only.
@@ -62,16 +112,26 @@ void P1Reader::begin()
         );
     }
 
-    lastInvalidTelegram_.clear();
+
+    // --------------------------------------------------------
+    // Reset runtime state.
+    // --------------------------------------------------------
 
     telegram_.clear();
     rawTelegram_.clear();
 
     receiving_ = false;
+    readingCrc_ = false;
+    crcCharactersRead_ = 0;
     lastCharacterTime_ = 0;
 
     valueCount_ = 0;
     dataAvailable_ = false;
+
+
+    // --------------------------------------------------------
+    // Reset statistics.
+    // --------------------------------------------------------
 
     validTelegramCount_ = 0;
     invalidTelegramCount_ = 0;
@@ -82,6 +142,11 @@ void P1Reader::begin()
     crcErrorCount_ = 0;
     bufferOverflowCount_ = 0;
     telegramTimeoutCount_ = 0;
+
+    lastReceivedCrc_ = 0;
+    lastCalculatedCrc_ = 0;
+    lastTelegramLength_ = 0;
+
 
     Serial.println("P1 reader started");
 
@@ -102,7 +167,7 @@ void P1Reader::begin()
 void P1Reader::loop()
 {
     // --------------------------------------------------------
-    // Abort incomplete telegram after timeout.
+    // Abort an incomplete telegram after timeout.
     // --------------------------------------------------------
 
     if (
@@ -128,7 +193,7 @@ void P1Reader::loop()
 
 
     // --------------------------------------------------------
-    // Read every byte currently available.
+    // Read every currently available byte.
     // --------------------------------------------------------
 
     while (serial_.available() > 0)
@@ -137,8 +202,6 @@ void P1Reader::loop()
             static_cast<char>(serial_.read());
 
         ++rxByteCount_;
-
-        lastCharacterTime_ = millis();
 
         processCharacter(c);
     }
@@ -192,7 +255,7 @@ const String& P1Reader::getLastTelegram() const
 
 
 // ============================================================
-// Statistics
+// Telegram statistics
 // ============================================================
 
 uint32_t P1Reader::getValidTelegramCount() const
@@ -243,11 +306,6 @@ uint32_t P1Reader::getTelegramTimeoutCount() const
 }
 
 
-bool P1Reader::isReceiving() const
-{
-    return receiving_;
-}
-
 uint16_t P1Reader::getLastReceivedCrc() const
 {
     return lastReceivedCrc_;
@@ -265,12 +323,135 @@ uint32_t P1Reader::getLastTelegramLength() const
     return lastTelegramLength_;
 }
 
+
+bool P1Reader::isReceiving() const
+{
+    return receiving_;
+}
+
+
+// ============================================================
+// Generic OBIS float accessor
+// ============================================================
+
+float P1Reader::getFloat(const char* obis) const
+{
+    for (size_t i = 0; i < valueCount_; ++i)
+    {
+        if (values_[i].obis == obis)
+        {
+            return values_[i].value.toFloat();
+        }
+    }
+
+    return 0.0f;
+}
+
+
+// ============================================================
+// Energy
+// ============================================================
+
+float P1Reader::importedEnergyTariff1() const
+{
+    return getFloat(OBIS_IMPORTED_ENERGY_TARIFF_1);
+}
+
+
+float P1Reader::importedEnergyTariff2() const
+{
+    return getFloat(OBIS_IMPORTED_ENERGY_TARIFF_2);
+}
+
+
+float P1Reader::exportedEnergyTariff1() const
+{
+    return getFloat(OBIS_EXPORTED_ENERGY_TARIFF_1);
+}
+
+
+float P1Reader::exportedEnergyTariff2() const
+{
+    return getFloat(OBIS_EXPORTED_ENERGY_TARIFF_2);
+}
+
+
+// ============================================================
+// Power
+// ============================================================
+
+float P1Reader::importedPower() const
+{
+    return getFloat(OBIS_IMPORTED_POWER);
+}
+
+
+float P1Reader::exportedPower() const
+{
+    return getFloat(OBIS_EXPORTED_POWER);
+}
+
+
+float P1Reader::netPower() const
+{
+    return importedPower() - exportedPower();
+}
+
+
+// ============================================================
+// Voltage
+// ============================================================
+
+float P1Reader::voltagePhase1() const
+{
+    return getFloat(OBIS_VOLTAGE_PHASE_1);
+}
+
+
+float P1Reader::voltagePhase2() const
+{
+    return getFloat(OBIS_VOLTAGE_PHASE_2);
+}
+
+
+float P1Reader::voltagePhase3() const
+{
+    return getFloat(OBIS_VOLTAGE_PHASE_3);
+}
+
+
+// ============================================================
+// Current
+// ============================================================
+
+float P1Reader::currentPhase1() const
+{
+    return getFloat(OBIS_CURRENT_PHASE_1);
+}
+
+
+float P1Reader::currentPhase2() const
+{
+    return getFloat(OBIS_CURRENT_PHASE_2);
+}
+
+
+float P1Reader::currentPhase3() const
+{
+    return getFloat(OBIS_CURRENT_PHASE_3);
+}
+
+
 // ============================================================
 // Process character
 // ============================================================
 
 void P1Reader::processCharacter(char c)
 {
+    // --------------------------------------------------------
+    // Optional byte-level debug.
+    // --------------------------------------------------------
+
     if (Settings::P1::DEBUG_LEVEL >= 3)
     {
         const uint8_t byte =
@@ -290,6 +471,9 @@ void P1Reader::processCharacter(char c)
     // Start of telegram.
     //
     // DSMR telegram starts with '/'.
+    //
+    // A new '/' always starts a new telegram. This also
+    // recovers from an incomplete previous telegram.
     // --------------------------------------------------------
 
     if (c == '/')
@@ -303,7 +487,7 @@ void P1Reader::processCharacter(char c)
             );
         }
 
-        // A new telegram supersedes previous notification.
+        // A new telegram supersedes the previous notification.
         dataAvailable_ = false;
 
         resetTelegram();
@@ -320,6 +504,8 @@ void P1Reader::processCharacter(char c)
 
     // --------------------------------------------------------
     // Ignore bytes outside a telegram.
+    //
+    // This also ignores CR/LF after a completed telegram.
     // --------------------------------------------------------
 
     if (!receiving_)
@@ -329,7 +515,103 @@ void P1Reader::processCharacter(char c)
 
 
     // --------------------------------------------------------
-    // Protect buffer.
+    // After '!' we expect exactly four hexadecimal CRC
+    // characters.
+    // --------------------------------------------------------
+
+    if (readingCrc_)
+    {
+        const bool isHex =
+            (c >= '0' && c <= '9') ||
+            (c >= 'A' && c <= 'F') ||
+            (c >= 'a' && c <= 'f');
+
+
+        // ----------------------------------------------------
+        // Anything other than a hexadecimal CRC character
+        // invalidates this telegram.
+        // ----------------------------------------------------
+
+        if (!isHex)
+        {
+            ++invalidTelegramCount_;
+
+            if (Settings::P1::DEBUG_LEVEL >= 1)
+            {
+                Serial.printf(
+                    "P1: INVALID CRC character 0x%02X\n",
+                    static_cast<unsigned int>(
+                        static_cast<uint8_t>(c)
+                    )
+                );
+            }
+
+            resetTelegram();
+
+            return;
+        }
+
+
+        // ----------------------------------------------------
+        // Protect buffer before appending CRC character.
+        // ----------------------------------------------------
+
+        if (
+            telegram_.length() >=
+            Settings::P1::BUFFER_SIZE - 1
+        )
+        {
+            ++bufferOverflowCount_;
+            ++invalidTelegramCount_;
+
+            if (Settings::P1::DEBUG_LEVEL >= 1)
+            {
+                Serial.println(
+                    "P1: BUFFER OVERFLOW while reading CRC"
+                );
+            }
+
+            resetTelegram();
+
+            return;
+        }
+
+
+        telegram_ += c;
+
+        ++crcCharactersRead_;
+
+        lastCharacterTime_ = millis();
+
+
+        // ----------------------------------------------------
+        // Exactly four CRC characters received.
+        // ----------------------------------------------------
+
+        if (crcCharactersRead_ == 4)
+        {
+            ++telegramEndCount_;
+
+            if (Settings::P1::DEBUG_LEVEL >= 1)
+            {
+                Serial.println(
+                    "P1: END '!'+4 CRC characters detected"
+                );
+            }
+
+            processTelegram();
+
+            // Keep rawTelegram_, parsed values and
+            // dataAvailable_. Reset only reception state.
+            resetTelegram();
+        }
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // Protect telegram buffer.
     // --------------------------------------------------------
 
     if (
@@ -357,50 +639,32 @@ void P1Reader::processCharacter(char c)
 
 
     // --------------------------------------------------------
-    // Append byte.
+    // End marker.
+    //
+    // '!' is part of the CRC-covered data and therefore MUST
+    // be stored in telegram_.
+    // --------------------------------------------------------
+
+    if (c == '!')
+    {
+        telegram_ += c;
+
+        readingCrc_ = true;
+        crcCharactersRead_ = 0;
+
+        lastCharacterTime_ = millis();
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // Normal telegram character.
     // --------------------------------------------------------
 
     telegram_ += c;
 
     lastCharacterTime_ = millis();
-
-
-    // --------------------------------------------------------
-    // Detect end marker.
-    //
-    // DSMR:
-    //
-    //     !XXXX
-    //
-    // where XXXX is four hexadecimal CRC characters.
-    // --------------------------------------------------------
-
-    const int exclamation =
-        telegram_.indexOf('!');
-
-    if (
-        exclamation >= 0 &&
-        telegram_.length() >=
-            static_cast<size_t>(
-                exclamation + 5
-            )
-    )
-    {
-        ++telegramEndCount_;
-
-        if (Settings::P1::DEBUG_LEVEL >= 1)
-        {
-            Serial.println(
-                "P1: END '!'+CRC detected"
-            );
-        }
-
-        processTelegram();
-
-        // Reset only the reception state.
-        // Keep parsed data and dataAvailable_.
-        resetTelegram();
-    }
 }
 
 
@@ -419,6 +683,7 @@ void P1Reader::processTelegram()
 
         Serial.print(telegram_);
 
+        Serial.println();
         Serial.println(
             "================================="
         );
@@ -426,18 +691,17 @@ void P1Reader::processTelegram()
 
 
     // --------------------------------------------------------
-    // CRC validation.
+    // Validate CRC before accepting telegram.
     // --------------------------------------------------------
 
     if (!validateCRC(telegram_))
     {
-        lastInvalidTelegram_ = telegram_;
-
-        invalidTelegramCount_++;
-        crcErrorCount_++;
+        ++invalidTelegramCount_;
+        ++crcErrorCount_;
 
         return;
     }
+
 
     // --------------------------------------------------------
     // Preserve raw telegram.
@@ -461,6 +725,7 @@ void P1Reader::processTelegram()
 
     dataAvailable_ = true;
 
+
     if (Settings::P1::DEBUG_LEVEL >= 1)
     {
         Serial.printf(
@@ -475,7 +740,7 @@ void P1Reader::processTelegram()
 
 
 // ============================================================
-// Reset current telegram
+// Reset current telegram reception
 // ============================================================
 
 void P1Reader::resetTelegram()
@@ -483,6 +748,10 @@ void P1Reader::resetTelegram()
     telegram_.clear();
 
     receiving_ = false;
+
+    readingCrc_ = false;
+
+    crcCharactersRead_ = 0;
 
     lastCharacterTime_ = 0;
 }
@@ -499,6 +768,7 @@ void P1Reader::parseTelegram(
     valueCount_ = 0;
 
     int lineStart = 0;
+
 
     while (
         lineStart <
@@ -517,6 +787,7 @@ void P1Reader::parseTelegram(
             lineEnd >= 0
                 ? lineEnd
                 : telegram.length();
+
 
         String line =
             telegram.substring(
@@ -563,6 +834,7 @@ void P1Reader::parseTelegram(
                         open + 1
                     );
 
+
                 if (close > open)
                 {
                     values_[valueCount_].obis =
@@ -593,60 +865,6 @@ void P1Reader::parseTelegram(
 
 
 // ============================================================
-// Imported power
-// ============================================================
-
-float P1Reader::importedPower() const
-{
-    for (size_t i = 0; i < valueCount_; ++i)
-    {
-        const P1Value& value = values_[i];
-
-        if (value.obis == OBIS_IMPORTED_POWER)
-        {
-            return value.value.toFloat();
-        }
-    }
-
-    return 0.0f;
-}
-
-
-// ============================================================
-// Exported power
-// ============================================================
-
-float P1Reader::exportedPower() const
-{
-    for (size_t i = 0; i < valueCount_; ++i)
-    {
-        const P1Value& value = values_[i];
-
-        if (value.obis == OBIS_EXPORTED_POWER)
-        {
-            return value.value.toFloat();
-        }
-    }
-
-    return 0.0f;
-}
-
-
-// ============================================================
-// Net power
-// ============================================================
-
-float P1Reader::netPower() const
-{
-    return importedPower() - exportedPower();
-}
-
-const String& P1Reader::getLastInvalidTelegram() const
-    {
-        return lastInvalidTelegram_;
-    }
-
-// ============================================================
 // CRC validation
 // ============================================================
 
@@ -657,18 +875,54 @@ bool P1Reader::validateCRC(
     const int exclamation =
         telegram.indexOf('!');
 
+
+    // --------------------------------------------------------
+    // A valid telegram must contain '!'.
+    // --------------------------------------------------------
+
     if (exclamation < 0)
     {
         return false;
     }
 
-    if (
-        telegram.length() <
-        static_cast<size_t>(exclamation + 5)
-    )
+
+    // --------------------------------------------------------
+    // The telegram must be exactly:
+    //
+    //     <data>!<4 hexadecimal CRC characters>
+    //
+    // No CR/LF or additional bytes are included.
+    // --------------------------------------------------------
+
+    const size_t expectedLength =
+        static_cast<size_t>(
+            exclamation + 5
+        );
+
+
+    if (telegram.length() != expectedLength)
     {
+        if (Settings::P1::DEBUG_LEVEL >= 2)
+        {
+            Serial.printf(
+                "P1 CRC: invalid length, "
+                "expected=%u actual=%u\n",
+                static_cast<unsigned int>(
+                    expectedLength
+                ),
+                static_cast<unsigned int>(
+                    telegram.length()
+                )
+            );
+        }
+
         return false;
     }
+
+
+    // --------------------------------------------------------
+    // Extract the four CRC characters.
+    // --------------------------------------------------------
 
     const String crcString =
         telegram.substring(
@@ -676,20 +930,40 @@ bool P1Reader::validateCRC(
             exclamation + 5
         );
 
+
+    // --------------------------------------------------------
+    // Verify that all four characters are hexadecimal.
+    // --------------------------------------------------------
+
     for (size_t i = 0; i < 4; ++i)
     {
         const char c = crcString[i];
 
-        const bool hex =
+        const bool isHex =
             (c >= '0' && c <= '9') ||
             (c >= 'A' && c <= 'F') ||
             (c >= 'a' && c <= 'f');
 
-        if (!hex)
+
+        if (!isHex)
         {
+            if (Settings::P1::DEBUG_LEVEL >= 2)
+            {
+                Serial.printf(
+                    "P1 CRC: invalid hexadecimal "
+                    "character '%c'\n",
+                    c
+                );
+            }
+
             return false;
         }
     }
+
+
+    // --------------------------------------------------------
+    // Convert received CRC.
+    // --------------------------------------------------------
 
     lastReceivedCrc_ =
         static_cast<uint16_t>(
@@ -699,6 +973,13 @@ bool P1Reader::validateCRC(
                 16
             )
         );
+
+
+    // --------------------------------------------------------
+    // Calculate CRC over everything through '!'.
+    //
+    // The four CRC characters themselves are excluded.
+    // --------------------------------------------------------
 
     lastCalculatedCrc_ =
         calculateCRC(
@@ -710,15 +991,25 @@ bool P1Reader::validateCRC(
             )
         );
 
+
+    // --------------------------------------------------------
+    // Report the CRC-covered telegram length.
+    //
+    // This is from '/' through '!'.
+    // --------------------------------------------------------
+
     lastTelegramLength_ =
         static_cast<uint32_t>(
             exclamation + 1
         );
 
+
     if (Settings::P1::DEBUG_LEVEL >= 2)
     {
         Serial.printf(
-            "P1 CRC: received=%04X calculated=%04X length=%lu\n",
+            "P1 CRC: received=%04X "
+            "calculated=%04X "
+            "length=%lu\n",
             lastReceivedCrc_,
             lastCalculatedCrc_,
             static_cast<unsigned long>(
@@ -727,13 +1018,15 @@ bool P1Reader::validateCRC(
         );
     }
 
+
     return
         lastReceivedCrc_ ==
         lastCalculatedCrc_;
 }
 
+
 // ============================================================
-// CRC-16/CCITT
+// CRC-16
 // ============================================================
 
 uint16_t P1Reader::calculateCRC(
@@ -743,9 +1036,11 @@ uint16_t P1Reader::calculateCRC(
 {
     uint16_t crc = 0x0000;
 
+
     for (size_t i = 0; i < length; ++i)
     {
         crc ^= data[i];
+
 
         for (uint8_t bit = 0; bit < 8; ++bit)
         {
@@ -765,6 +1060,7 @@ uint16_t P1Reader::calculateCRC(
             }
         }
     }
+
 
     return crc;
 }

@@ -36,7 +36,6 @@ bool UDPServer::begin()
     Serial.print("Starting UDP server on port ");
     Serial.println(port_);
 
-
     if (!crypto_.ready())
     {
         Serial.println(
@@ -45,7 +44,6 @@ bool UDPServer::begin()
 
         return false;
     }
-
 
     if (!udp_.begin(port_))
     {
@@ -56,9 +54,7 @@ bool UDPServer::begin()
         return false;
     }
 
-
     initialized_ = true;
-
 
     Serial.println(
         "UDP server started."
@@ -72,6 +68,17 @@ bool UDPServer::begin()
         crypto_.deviceName()
     );
 
+    Serial.print(
+        "Expected packet size: "
+    );
+
+    Serial.print(
+        UDPCrypto::PACKET_SIZE
+    );
+
+    Serial.println(
+        " bytes"
+    );
 
     return true;
 }
@@ -92,7 +99,6 @@ void UDPServer::loop()
     if (packetSize <= 0)
         return;
 
-
     packetsReceived_++;
 
     processPacket();
@@ -109,13 +115,11 @@ void UDPServer::processPacket()
         UDPCrypto::PACKET_SIZE
     ];
 
-
     const int packetSize =
         udp_.read(
             buffer,
             sizeof(buffer)
         );
-
 
     if (packetSize !=
         static_cast<int>(
@@ -135,16 +139,13 @@ void UDPServer::processPacket()
         return;
     }
 
-
     const IPAddress remoteIP =
         udp_.remoteIP();
 
     const uint16_t remotePort =
         udp_.remotePort();
 
-
     UDPCrypto::Packet packet;
-
 
     if (!crypto_.decrypt(
             buffer,
@@ -157,9 +158,7 @@ void UDPServer::processPacket()
         );
 
         Serial.print(remoteIP);
-
         Serial.print(":");
-
         Serial.println(remotePort);
 
         packetsRejected_++;
@@ -167,9 +166,7 @@ void UDPServer::processPacket()
         return;
     }
 
-
     packetsAccepted_++;
-
 
     printPacket(
         packet,
@@ -188,22 +185,74 @@ void UDPServer::printPacket(
     const IPAddress& remoteIP,
     uint16_t remotePort)
 {
+    const UDPProtocol::P1Metrics& m =
+        packet.metrics;
+
     Serial.printf(
         "UDP: device=%s "
         "seq=%llu "
         "timestamp=%llu ms "
-        "net=%.3f kW "
         "from=%s:%u\n",
+
         crypto_.deviceName(),
+
         static_cast<unsigned long long>(
             packet.sequence
         ),
+
         static_cast<unsigned long long>(
             packet.timestampMs
         ),
-        packet.netPower,
+
         remoteIP.toString().c_str(),
+
         remotePort
+    );
+
+    Serial.printf(
+        "     energy: "
+        "import_t1=%.3f kWh "
+        "import_t2=%.3f kWh "
+        "export_t1=%.3f kWh "
+        "export_t2=%.3f kWh\n",
+
+        m.importedEnergyTariff1,
+        m.importedEnergyTariff2,
+        m.exportedEnergyTariff1,
+        m.exportedEnergyTariff2
+    );
+
+    Serial.printf(
+        "     power: "
+        "import=%.3f kW "
+        "export=%.3f kW "
+        "net=%.3f kW\n",
+
+        m.importedPower,
+        m.exportedPower,
+        m.netPower
+    );
+
+    Serial.printf(
+        "     voltage: "
+        "L1=%.1f V "
+        "L2=%.1f V "
+        "L3=%.1f V\n",
+
+        m.voltagePhase1,
+        m.voltagePhase2,
+        m.voltagePhase3
+    );
+
+    Serial.printf(
+        "     current: "
+        "L1=%.1f A "
+        "L2=%.1f A "
+        "L3=%.1f A\n",
+
+        m.currentPhase1,
+        m.currentPhase2,
+        m.currentPhase3
     );
 }
 

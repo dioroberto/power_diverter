@@ -1,5 +1,6 @@
 #include "UDPClient.h"
 
+#include "UDPProtocol.h"
 #include "secrets.h"
 #include "secrets_udp.h"
 #include "udp_config.h"
@@ -206,10 +207,10 @@ void UDPClient::markUnavailable()
 
 
 // ============================================================
-// Send net power
+// Send P1 metrics
 // ============================================================
 
-void UDPClient::sendNetPower(
+void UDPClient::sendMetrics(
     const P1Reader& p1Reader
 )
 {
@@ -230,11 +231,56 @@ void UDPClient::sendNetPower(
 
 
     // --------------------------------------------------------
-    // Obtain semantic value from P1Reader.
+    // Build shared P1 metrics structure.
+    //
+    // This structure is defined in UDPProtocol.h and is also
+    // used by the UDP receiver.
     // --------------------------------------------------------
 
-    const float netPower =
+    UDPProtocol::P1Metrics metrics{};
+
+
+    metrics.importedEnergyTariff1 =
+        p1Reader.importedEnergyTariff1();
+
+    metrics.importedEnergyTariff2 =
+        p1Reader.importedEnergyTariff2();
+
+    metrics.exportedEnergyTariff1 =
+        p1Reader.exportedEnergyTariff1();
+
+    metrics.exportedEnergyTariff2 =
+        p1Reader.exportedEnergyTariff2();
+
+
+    metrics.importedPower =
+        p1Reader.importedPower();
+
+    metrics.exportedPower =
+        p1Reader.exportedPower();
+
+    metrics.netPower =
         p1Reader.netPower();
+
+
+    metrics.voltagePhase1 =
+        p1Reader.voltagePhase1();
+
+    metrics.voltagePhase2 =
+        p1Reader.voltagePhase2();
+
+    metrics.voltagePhase3 =
+        p1Reader.voltagePhase3();
+
+
+    metrics.currentPhase1 =
+        p1Reader.currentPhase1();
+
+    metrics.currentPhase2 =
+        p1Reader.currentPhase2();
+
+    metrics.currentPhase3 =
+        p1Reader.currentPhase3();
 
 
     // --------------------------------------------------------
@@ -255,16 +301,21 @@ void UDPClient::sendNetPower(
 
 
     // --------------------------------------------------------
-    // Encrypt.
+    // Allocate complete encrypted packet.
     // --------------------------------------------------------
 
     uint8_t packet[UDPCrypto::PACKET_SIZE];
 
 
+    // --------------------------------------------------------
+    // Encrypt.
+    // --------------------------------------------------------
+
     if (!crypto_.encrypt(
             sequence,
             timestamp,
-            netPower,
+            reinterpret_cast<const uint8_t*>(&metrics),
+            sizeof(metrics),
             packet,
             sizeof(packet)))
     {
@@ -329,7 +380,7 @@ void UDPClient::sendNetPower(
             static_cast<unsigned int>(sizeof(packet))
         );
 
-        // Cancel/finish current packet.
+        // Finish/cancel current packet.
         udp_.endPacket();
 
         return;
@@ -355,11 +406,17 @@ void UDPClient::sendNetPower(
     // --------------------------------------------------------
 
     Serial.printf(
-        "UDP: encrypted packet sent: "
-        "%u bytes, sequence=%llu, net=%.3f W\n",
+        "UDP: encrypted P1 packet sent: "
+        "%u bytes, "
+        "sequence=%llu, "
+        "import=%.3f W, "
+        "export=%.3f W, "
+        "net=%.3f W\n",
         static_cast<unsigned int>(sizeof(packet)),
         static_cast<unsigned long long>(sequence),
-        netPower
+        metrics.importedPower,
+        metrics.exportedPower,
+        metrics.netPower
     );
 }
 

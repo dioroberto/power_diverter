@@ -23,7 +23,7 @@ public:
 
     void loop();
 
-    void sendNetPower(
+    void sendMetrics(
         const P1Reader& p1Reader
     );
 

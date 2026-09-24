@@ -10,6 +10,7 @@
 #include "P1Reader.h"
 #include "UDPClient.h"
 #include "MQTTClient.h"
+#include "UDPProtocol.h"
 #include "udp_config.h"
 
 
@@ -20,6 +21,21 @@
 namespace App
 {
     constexpr uint8_t PROVISION_PIN = 27;
+
+
+    // -------------------------------------------------------------------------
+    // Runtime state
+    // -------------------------------------------------------------------------
+
+    bool haveP1Data = false;
+
+    bool mqttFirstPublishPending = false;
+
+    uint32_t lastP1TelegramMs = 0;
+
+    uint32_t lastMqttPublishMs = 0;
+
+    uint32_t lastP1HealthPublishMs = 0;
 }
 
 
@@ -51,24 +67,6 @@ MQTTClient mqttClient(
     Settings::MQTT::PASSWORD,
     UDPConfig::DEVICE_NAME
 );
-
-
-// =============================================================================
-// Runtime state
-// =============================================================================
-
-namespace App
-{
-    bool haveP1Data = false;
-
-    bool mqttFirstPublishPending = false;
-
-    uint32_t lastP1TelegramMs = 0;
-
-    uint32_t lastMqttPublishMs = 0;
-
-    uint32_t lastP1HealthPublishMs = 0;
-}
 
 
 // =============================================================================
@@ -403,19 +401,21 @@ String buildMqttPayload()
 
 
 // =============================================================================
-// P1 health
+// Publish P1 health
 // =============================================================================
 
 void publishP1Health()
 {
     if (!mqttClient.connected())
-    {
         return;
-    }
 
-    const uint32_t now = millis();
+
+    const uint32_t now =
+        millis();
+
 
     uint32_t telegramAge = 0;
+
 
     if (App::haveP1Data)
     {
@@ -423,102 +423,167 @@ void publishP1Health()
             now - App::lastP1TelegramMs;
     }
 
+
     String payload;
 
     payload.reserve(512);
 
-    payload += "{";
+
+    payload += '{';
+
+
+    // -------------------------------------------------------------------------
+    // Availability
+    // -------------------------------------------------------------------------
 
     payload += "\"available\":";
-    payload += App::haveP1Data ? "true" : "false";
+    payload +=
+        App::haveP1Data
+            ? "true"
+            : "false";
+
+
+    // -------------------------------------------------------------------------
+    // Telegram age
+    // -------------------------------------------------------------------------
 
     payload += ",\"telegram_age_ms\":";
-    payload += String(telegramAge);
+    payload += String(
+        telegramAge
+    );
+
+
+    // -------------------------------------------------------------------------
+    // Parsed values
+    // -------------------------------------------------------------------------
 
     payload += ",\"value_count\":";
     payload += String(
         p1Reader.getValueCount()
     );
 
+
     payload += ",\"last_telegram_ms\":";
     payload += String(
         App::lastP1TelegramMs
     );
+
+
+    // -------------------------------------------------------------------------
+    // Reception statistics
+    // -------------------------------------------------------------------------
 
     payload += ",\"rx_bytes\":";
     payload += String(
         p1Reader.getRxByteCount()
     );
 
+
     payload += ",\"telegram_starts\":";
     payload += String(
         p1Reader.getTelegramStartCount()
     );
+
 
     payload += ",\"telegram_ends\":";
     payload += String(
         p1Reader.getTelegramEndCount()
     );
 
+
+    // -------------------------------------------------------------------------
+    // Validation statistics
+    // -------------------------------------------------------------------------
+
     payload += ",\"valid\":";
     payload += String(
         p1Reader.getValidTelegramCount()
     );
+
 
     payload += ",\"invalid\":";
     payload += String(
         p1Reader.getInvalidTelegramCount()
     );
 
+
     payload += ",\"crc_errors\":";
     payload += String(
         p1Reader.getCrcErrorCount()
     );
+
 
     payload += ",\"timeouts\":";
     payload += String(
         p1Reader.getTelegramTimeoutCount()
     );
 
+
     payload += ",\"overflows\":";
     payload += String(
         p1Reader.getBufferOverflowCount()
     );
 
+
+    // -------------------------------------------------------------------------
+    // Current reception state
+    // -------------------------------------------------------------------------
+
     payload += ",\"receiving\":";
-    payload += p1Reader.isReceiving()
-        ? "true"
-        : "false";
+    payload +=
+        p1Reader.isReceiving()
+            ? "true"
+            : "false";
+
+
+    // -------------------------------------------------------------------------
+    // Last CRC values
+    // -------------------------------------------------------------------------
 
     payload += ",\"last_received_crc\":\"";
+
     payload += String(
         p1Reader.getLastReceivedCrc(),
         HEX
     );
-    payload += "\"";
+
+    payload += '"';
+
 
     payload += ",\"last_calculated_crc\":\"";
+
     payload += String(
         p1Reader.getLastCalculatedCrc(),
         HEX
     );
-    payload += "\"";
+
+    payload += '"';
+
+
+    // -------------------------------------------------------------------------
+    // Last telegram length
+    // -------------------------------------------------------------------------
 
     payload += ",\"last_telegram_length\":";
     payload += String(
         p1Reader.getLastTelegramLength()
     );
 
-    payload += "\"";
 
-    payload += "}";
+    // -------------------------------------------------------------------------
+    // Close JSON
+    // -------------------------------------------------------------------------
+
+    payload += '}';
+
 
     mqttClient.publish(
-    Settings::MQTT::Topic::STATUS().c_str(),
-    payload.c_str(),
-    false
+        Settings::MQTT::Topic::STATUS().c_str(),
+        payload.c_str(),
+        false
     );
 }
+
 
 // =============================================================================
 // MQTT data scheduler
@@ -564,6 +629,7 @@ void processMqttData()
                 "[MQTT] Initial P1 snapshot published."
             );
 
+
             Serial.print(
                 "[MQTT] Topic: "
             );
@@ -593,10 +659,11 @@ void processMqttData()
     }
 
 
-    // Advance the timer BEFORE checking MQTT.
+    // Advance timer before checking MQTT.
     //
-    // This deliberately prevents a disconnected MQTT client from causing
+    // This prevents a disconnected MQTT client from causing
     // a tight retry loop.
+
     App::lastMqttPublishMs =
         now;
 
@@ -663,10 +730,10 @@ void processMqttData()
 
 
 // =============================================================================
-// P1 processing
+// Process P1
 // =============================================================================
 //
-// P1 is the primary real-time path.
+// P1 is the primary real-time path:
 //
 //     P1 telegram
 //         |
@@ -717,15 +784,15 @@ void processP1()
     // UDP
     // -------------------------------------------------------------------------
     //
-    // UDP is independent from MQTT.
+    // Send the complete P1 metrics payload.
     //
-    // If the server has not yet been resolved, UDPClient simply skips the
-    // packet. It does not block P1 processing.
+    // UDPClient handles the case where the destination is not currently
+    // available.
     // -------------------------------------------------------------------------
 
     if (udpClient.ready())
     {
-        udpClient.sendNetPower(
+        udpClient.sendMetrics(
             p1Reader
         );
     }
@@ -805,11 +872,19 @@ void printConfiguration()
     );
 
 
+    // -------------------------------------------------------------------------
+    // Device
+    // -------------------------------------------------------------------------
+
     Serial.print("Device: ");
     Serial.println(
         UDPConfig::DEVICE_NAME
     );
 
+
+    // -------------------------------------------------------------------------
+    // P1
+    // -------------------------------------------------------------------------
 
     Serial.print("P1 RX: ");
     Serial.println(
@@ -837,6 +912,10 @@ void printConfiguration()
     );
 
 
+    // -------------------------------------------------------------------------
+    // UDP
+    // -------------------------------------------------------------------------
+
     Serial.print("UDP server: ");
     Serial.println(
         UDPConfig::SERVER_NAME
@@ -846,6 +925,18 @@ void printConfiguration()
     Serial.print("UDP port: ");
     Serial.println(
         UDPConfig::SERVER_PORT
+    );
+
+
+    Serial.print("UDP packet size: ");
+    Serial.println(
+        UDPCrypto::PACKET_SIZE
+    );
+
+
+    Serial.print("UDP P1 metrics size: ");
+    Serial.println(
+        UDPProtocol::P1_METRICS_SIZE
     );
 
 
@@ -860,18 +951,25 @@ void printConfiguration()
     if (udpClient.ready())
     {
         Serial.print("UDP destination: ");
+
         Serial.print(
             udpClient.serverIP()
         );
 
         Serial.print(":");
+
         Serial.println(
             UDPConfig::SERVER_PORT
         );
     }
 
 
+    // -------------------------------------------------------------------------
+    // MQTT
+    // -------------------------------------------------------------------------
+
     Serial.print("MQTT server: ");
+
     Serial.print(
         Settings::MQTT::HOST
     );
@@ -884,24 +982,28 @@ void printConfiguration()
 
 
     Serial.print("MQTT client ID: ");
+
     Serial.println(
         UDPConfig::DEVICE_NAME
     );
 
 
     Serial.print("MQTT P1 topic: ");
+
     Serial.println(
         mqttClient.p1DataTopic()
     );
 
 
     Serial.print("MQTT availability topic: ");
+
     Serial.println(
         Settings::MQTT::Topic::AVAILABILITY()
     );
 
 
     Serial.print("MQTT publish interval: ");
+
     Serial.print(
         Settings::MQTT::PUBLISH_INTERVAL_MS /
         1000UL
@@ -910,7 +1012,12 @@ void printConfiguration()
     Serial.println(" seconds");
 
 
+    // -------------------------------------------------------------------------
+    // Health
+    // -------------------------------------------------------------------------
+
     Serial.print("P1 health interval: ");
+
     Serial.print(
         Settings::Application::STATUS_INTERVAL_MS /
         1000UL
@@ -946,18 +1053,22 @@ void setup()
     // -------------------------------------------------------------------------
 
     Serial.println();
+
     Serial.println(
         "========================================"
     );
+
     Serial.println(
         "           ESP32 P1 GATEWAY"
     );
+
     Serial.println(
         "========================================"
     );
 
 
     Serial.print("Device: ");
+
     Serial.println(
         UDPConfig::DEVICE_NAME
     );
@@ -1136,7 +1247,7 @@ void loop()
     // 5. MQTT transport
     // =========================================================================
     //
-    // Keep this serviced independently from P1 and UDP.
+    // Keep MQTT serviced independently from P1 and UDP.
     // =========================================================================
 
     mqttClient.loop();

@@ -1,4 +1,5 @@
 #include "UDPCrypto.h"
+#include "udp_config.h"
 
 #include <Crypto.h>
 #include <Curve25519.h>
@@ -9,24 +10,12 @@
 
 #include <cstring>
 
+
 namespace
 {
-    // ========================================================
-    // Protocol constants
-    // ========================================================
-
-    constexpr char HKDF_INFO[] =
-        "DIONISIOTECH-P1-UDP-v1";
-
-    constexpr size_t HKDF_INFO_SIZE =
-        sizeof(HKDF_INFO) - 1;
-
+    
     // ========================================================
     // Secure memory clearing
-    //
-    // Do not use Crypto::clean() here because Crypto.h may
-    // provide overloaded clean() functions that can cause
-    // ambiguity with array types.
     // ========================================================
 
     void secureClean(
@@ -43,6 +32,7 @@ namespace
     }
 }
 
+
 // ============================================================
 // Constructor
 // ============================================================
@@ -57,6 +47,7 @@ UDPCrypto::UDPCrypto()
 {
 }
 
+
 // ============================================================
 // Begin
 // ============================================================
@@ -66,10 +57,6 @@ bool UDPCrypto::begin(
     const uint8_t serverPublicKey[KEY_SIZE],
     const char* deviceName)
 {
-    // --------------------------------------------------------
-    // Validate arguments
-    // --------------------------------------------------------
-
     if (devicePrivateKey == nullptr ||
         serverPublicKey == nullptr ||
         deviceName == nullptr)
@@ -78,12 +65,10 @@ bool UDPCrypto::begin(
         return false;
     }
 
-    // --------------------------------------------------------
-    // Validate device name
-    // --------------------------------------------------------
 
     const size_t nameLength =
         strlen(deviceName);
+
 
     if (nameLength == 0 ||
         nameLength >= sizeof(deviceName_))
@@ -92,10 +77,9 @@ bool UDPCrypto::begin(
         return false;
     }
 
+
     // --------------------------------------------------------
-    // Reset previous state.
-    //
-    // This makes repeated begin() calls safe.
+    // Clear previous state
     // --------------------------------------------------------
 
     secureClean(
@@ -118,10 +102,12 @@ bool UDPCrypto::begin(
         deviceName_,
         sizeof(deviceName_));
 
+
     initialized_ = false;
 
+
     // --------------------------------------------------------
-    // Copy device credentials
+    // Store credentials
     // --------------------------------------------------------
 
     memcpy(
@@ -134,8 +120,9 @@ bool UDPCrypto::begin(
         serverPublicKey,
         KEY_SIZE);
 
+
     // --------------------------------------------------------
-    // Copy device name
+    // Store device name
     // --------------------------------------------------------
 
     memcpy(
@@ -145,14 +132,16 @@ bool UDPCrypto::begin(
 
     deviceName_[nameLength] = '\0';
 
+
     // --------------------------------------------------------
     // Initialize RNG
     // --------------------------------------------------------
 
-    RNG.begin(HKDF_INFO);
+    RNG.begin(UDPConfig::HKDF_INFO);
+
 
     // --------------------------------------------------------
-    // Generate fresh session nonce
+    // Generate session nonce
     // --------------------------------------------------------
 
     if (!generateSessionNonce())
@@ -180,6 +169,7 @@ bool UDPCrypto::begin(
         return false;
     }
 
+
     // --------------------------------------------------------
     // Derive session key
     // --------------------------------------------------------
@@ -192,7 +182,7 @@ bool UDPCrypto::begin(
 
         secureClean(
             serverPublicKey_,
-            sizeof(serverPublicKey_));
+        sizeof(serverPublicKey_));
 
         secureClean(
             sessionKey_,
@@ -209,10 +199,12 @@ bool UDPCrypto::begin(
         return false;
     }
 
+
     initialized_ = true;
 
     return true;
 }
+
 
 // ============================================================
 // Generate session nonce
@@ -222,6 +214,7 @@ bool UDPCrypto::generateSessionNonce()
 {
     constexpr size_t nonceSize =
         sizeof(sessionNonce_);
+
 
     for (uint32_t attempt = 0;
          attempt < 100;
@@ -236,12 +229,15 @@ bool UDPCrypto::generateSessionNonce()
             return true;
         }
 
+
         RNG.loop();
         delay(1);
     }
 
+
     return false;
 }
+
 
 // ============================================================
 // Derive session key
@@ -250,6 +246,7 @@ bool UDPCrypto::generateSessionNonce()
 bool UDPCrypto::deriveSessionKey()
 {
     uint8_t sharedSecret[KEY_SIZE] = {};
+
 
     // --------------------------------------------------------
     // X25519
@@ -267,6 +264,7 @@ bool UDPCrypto::deriveSessionKey()
         return false;
     }
 
+
     // --------------------------------------------------------
     // HKDF-SHA256
     // --------------------------------------------------------
@@ -281,19 +279,24 @@ bool UDPCrypto::deriveSessionKey()
         sessionKey_,
         sizeof(sessionKey_),
         reinterpret_cast<const uint8_t*>(
-            HKDF_INFO),
-        HKDF_INFO_SIZE);
+            UDPConfig::HKDF_INFO
+        ),
+        strlen(UDPConfig::HKDF_INFO)
+    );
+
 
     // --------------------------------------------------------
-    // Never retain the X25519 shared secret.
+    // Erase shared secret
     // --------------------------------------------------------
 
     secureClean(
         sharedSecret,
         sizeof(sharedSecret));
 
+
     return true;
 }
+
 
 // ============================================================
 // Write uint64_t big-endian
@@ -313,41 +316,6 @@ void UDPCrypto::writeUint64BE(
     }
 }
 
-// ============================================================
-// Write float big-endian
-// ============================================================
-
-void UDPCrypto::writeFloatBE(
-    uint8_t* destination,
-    float value)
-{
-    static_assert(
-        sizeof(float) == sizeof(uint32_t),
-        "This protocol requires 32-bit float");
-
-    uint32_t raw = 0;
-
-    memcpy(
-        &raw,
-        &value,
-        sizeof(raw));
-
-    destination[0] =
-        static_cast<uint8_t>(
-            (raw >> 24) & 0xFFU);
-
-    destination[1] =
-        static_cast<uint8_t>(
-            (raw >> 16) & 0xFFU);
-
-    destination[2] =
-        static_cast<uint8_t>(
-            (raw >> 8) & 0xFFU);
-
-    destination[3] =
-        static_cast<uint8_t>(
-            raw & 0xFFU);
-}
 
 // ============================================================
 // Encrypt UDP packet
@@ -356,31 +324,46 @@ void UDPCrypto::writeFloatBE(
 bool UDPCrypto::encrypt(
     uint64_t sequence,
     uint64_t timestampMs,
-    float netPower,
+    const uint8_t* payload,
+    size_t payloadSize,
     uint8_t* output,
     size_t outputSize)
 {
     // --------------------------------------------------------
-    // Validate state and output buffer
+    // Validate arguments
     // --------------------------------------------------------
 
     if (!initialized_ ||
+        payload == nullptr ||
         output == nullptr ||
-        outputSize < PACKET_SIZE)
+        payloadSize != UDPProtocol::P1_METRICS_SIZE)
     {
         return false;
     }
+
+
+    if (outputSize < PACKET_SIZE)
+    {
+        return false;
+    }
+
+
+    // --------------------------------------------------------
+    // Clear output
+    // --------------------------------------------------------
 
     memset(
         output,
         0,
         PACKET_SIZE);
 
+
     // ========================================================
     // Header
     // ========================================================
 
     size_t offset = 0;
+
 
     // --------------------------------------------------------
     // Protocol version
@@ -389,10 +372,9 @@ bool UDPCrypto::encrypt(
     output[offset++] =
         PROTOCOL_VERSION;
 
+
     // --------------------------------------------------------
     // Device name
-    //
-    // Fixed-size, zero-padded field.
     // --------------------------------------------------------
 
     memcpy(
@@ -402,6 +384,7 @@ bool UDPCrypto::encrypt(
 
     offset += DEVICE_NAME_SIZE;
 
+
     // --------------------------------------------------------
     // Sequence
     // --------------------------------------------------------
@@ -412,12 +395,13 @@ bool UDPCrypto::encrypt(
 
     offset += sizeof(uint64_t);
 
+
     // --------------------------------------------------------
     // Nonce
     //
-    // 4-byte random session nonce
+    // 4-byte session nonce
     // +
-    // 8-byte packet sequence
+    // 8-byte sequence
     // --------------------------------------------------------
 
     memcpy(
@@ -427,14 +411,16 @@ bool UDPCrypto::encrypt(
 
     offset += sizeof(sessionNonce_);
 
+
     writeUint64BE(
         output + offset,
         sequence);
 
     offset += sizeof(uint64_t);
 
+
     // --------------------------------------------------------
-    // Verify calculated header size.
+    // Verify header size
     // --------------------------------------------------------
 
     if (offset != HEADER_SIZE)
@@ -442,59 +428,79 @@ bool UDPCrypto::encrypt(
         return false;
     }
 
+
     // ========================================================
-    // Plaintext
+    // Encrypted plaintext
+    //
+    //   sequence
+    //   timestamp
+    //   P1Metrics
     // ========================================================
 
-    uint8_t plaintext[PLAINTEXT_SIZE] = {};
+    uint8_t plaintext[
+        PLAINTEXT_SIZE
+    ] = {};
+
 
     size_t plainOffset = 0;
 
+
+    // --------------------------------------------------------
     // Sequence
+    // --------------------------------------------------------
+
     writeUint64BE(
         plaintext + plainOffset,
         sequence);
 
     plainOffset += sizeof(uint64_t);
 
+
+    // --------------------------------------------------------
     // Timestamp
+    // --------------------------------------------------------
+
     writeUint64BE(
         plaintext + plainOffset,
         timestampMs);
 
     plainOffset += sizeof(uint64_t);
 
-    // Net power
-    writeFloatBE(
+
+    // --------------------------------------------------------
+    // P1 metrics
+    // --------------------------------------------------------
+
+    memcpy(
         plaintext + plainOffset,
-        netPower);
+        payload,
+        payloadSize);
+
 
     // ========================================================
     // ChaCha20-Poly1305
     // ========================================================
 
-    // The nonce starts after:
-    //
-    //   1 byte  protocol version
-    //   N bytes device name
-    //   8 bytes sequence
-    //
     const uint8_t* nonce =
         output +
-        1 +
+        sizeof(uint8_t) +
         DEVICE_NAME_SIZE +
         sizeof(uint64_t);
+
 
     uint8_t* ciphertext =
         output + HEADER_SIZE;
 
+
     uint8_t* tag =
         ciphertext + PLAINTEXT_SIZE;
 
+
     ChaChaPoly cipher;
 
+
     // --------------------------------------------------------
-    // Set encryption key
+    // Encryption key
     // --------------------------------------------------------
 
     if (!cipher.setKey(
@@ -508,8 +514,9 @@ bool UDPCrypto::encrypt(
         return false;
     }
 
+
     // --------------------------------------------------------
-    // Set packet nonce
+    // Packet nonce
     // --------------------------------------------------------
 
     if (!cipher.setIV(
@@ -523,19 +530,18 @@ bool UDPCrypto::encrypt(
         return false;
     }
 
+
     // --------------------------------------------------------
-    // Authenticate the complete header.
-    //
-    // The header is transmitted in cleartext but protected
-    // by the Poly1305 authentication tag.
+    // Authenticate header
     // --------------------------------------------------------
 
     cipher.addAuthData(
         output,
         HEADER_SIZE);
 
+
     // --------------------------------------------------------
-    // Encrypt plaintext
+    // Encrypt
     // --------------------------------------------------------
 
     cipher.encrypt(
@@ -543,24 +549,28 @@ bool UDPCrypto::encrypt(
         plaintext,
         PLAINTEXT_SIZE);
 
+
     // --------------------------------------------------------
-    // Generate authentication tag
+    // Authentication tag
     // --------------------------------------------------------
 
     cipher.computeTag(
         tag,
         TAG_SIZE);
 
+
     // --------------------------------------------------------
-    // Erase plaintext immediately.
+    // Erase plaintext
     // --------------------------------------------------------
 
     secureClean(
         plaintext,
         sizeof(plaintext));
 
+
     return true;
 }
+
 
 // ============================================================
 // Ready

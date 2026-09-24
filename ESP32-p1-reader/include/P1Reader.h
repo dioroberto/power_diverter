@@ -62,9 +62,18 @@ public:
     uint16_t getLastCalculatedCrc() const;
     uint32_t getLastTelegramLength() const;
 
-    const String& getLastInvalidTelegram() const;
-
     bool isReceiving() const;
+
+
+    // =========================================================
+    // Energy
+    // =========================================================
+
+    float importedEnergyTariff1() const;
+    float importedEnergyTariff2() const;
+
+    float exportedEnergyTariff1() const;
+    float exportedEnergyTariff2() const;
 
 
     // =========================================================
@@ -74,6 +83,24 @@ public:
     float importedPower() const;
     float exportedPower() const;
     float netPower() const;
+
+
+    // =========================================================
+    // Voltage
+    // =========================================================
+
+    float voltagePhase1() const;
+    float voltagePhase2() const;
+    float voltagePhase3() const;
+
+
+    // =========================================================
+    // Current
+    // =========================================================
+
+    float currentPhase1() const;
+    float currentPhase2() const;
+    float currentPhase3() const;
 
 
 private:
@@ -99,6 +126,12 @@ private:
 
     bool receiving_ = false;
 
+    // Set after '!' has been received.
+    // Exactly four hexadecimal CRC characters follow.
+    bool readingCrc_ = false;
+
+    uint8_t crcCharactersRead_ = 0;
+
     uint32_t lastCharacterTime_ = 0;
 
 
@@ -107,8 +140,6 @@ private:
     // =========================================================
 
     String rawTelegram_;
-
-    String lastInvalidTelegram_;
 
 
     // =========================================================
@@ -176,4 +207,11 @@ private:
     // =========================================================
 
     void parseTelegram(const String& telegram);
+
+
+    // =========================================================
+    // OBIS helpers
+    // =========================================================
+
+    float getFloat(const char* obis) const;
 };

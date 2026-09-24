@@ -2,10 +2,13 @@
 
 #include <Arduino.h>
 
+#include "UDPProtocol.h"
+
 class UDPCrypto
 {
 public:
-    static constexpr uint8_t PROTOCOL_VERSION = 1;
+    static constexpr uint8_t PROTOCOL_VERSION =
+        UDPProtocol::VERSION;
 
     static constexpr size_t KEY_SIZE = 32;
     static constexpr size_t NONCE_SIZE = 12;
@@ -13,10 +16,11 @@ public:
 
     static constexpr size_t DEVICE_NAME_SIZE = 16;
 
+    static constexpr size_t PLAINTEXT_METADATA_SIZE =
+        UDPProtocol::ENCRYPTED_METADATA_SIZE;
+
     static constexpr size_t PLAINTEXT_SIZE =
-        sizeof(uint64_t) +
-        sizeof(uint64_t) +
-        sizeof(float);
+        UDPProtocol::ENCRYPTED_PAYLOAD_SIZE;
 
     static constexpr size_t HEADER_SIZE =
         sizeof(uint8_t) +
@@ -33,7 +37,8 @@ public:
     {
         uint64_t sequence;
         uint64_t timestampMs;
-        float netPower;
+
+        UDPProtocol::P1Metrics metrics;
     };
 
     UDPCrypto();
@@ -57,17 +62,13 @@ public:
 private:
     bool deriveSessionKey();
 
-    static void writeUint64BE(
-        uint8_t* destination,
-        uint64_t value
-    );
-
     static uint64_t readUint64BE(
         const uint8_t* source
     );
 
-    static float readFloatBE(
-        const uint8_t* source
+    static void clean(
+        void* data,
+        size_t size
     );
 
     char deviceName_[DEVICE_NAME_SIZE + 1];
