@@ -32,36 +32,58 @@ UDPServer::UDPServer(
 
 bool UDPServer::begin()
 {
+    // Already initialized.
+    if (initialized_)
+        return true;
+
     Serial.println();
-    Serial.print("Starting UDP server on port ");
-    Serial.println(port_);
+    Serial.printf(
+        "[UDP] Starting server on port %u\n",
+        static_cast<unsigned int>(port_)
+    );
+
+
+    // -------------------------------------------------------------------------
+    // Crypto
+    // -------------------------------------------------------------------------
 
     if (!crypto_.ready())
     {
         Serial.println(
-            "ERROR: UDP crypto initialization failed."
+            "[UDP] ERROR: Crypto initialization failed."
         );
 
         return false;
     }
+
+
+    // -------------------------------------------------------------------------
+    // UDP socket
+    // -------------------------------------------------------------------------
 
     if (!udp_.begin(port_))
     {
         Serial.println(
-            "ERROR: udp.begin() failed."
+            "[UDP] ERROR: udp.begin() failed."
         );
 
         return false;
     }
 
+
     initialized_ = true;
 
+
+    // -------------------------------------------------------------------------
+    // Diagnostics
+    // -------------------------------------------------------------------------
+
     Serial.println(
-        "UDP server started."
+        "[UDP] Server started."
     );
 
     Serial.print(
-        "Listening for device: "
+        "[UDP] Listening for device: "
     );
 
     Serial.println(
@@ -69,7 +91,7 @@ bool UDPServer::begin()
     );
 
     Serial.print(
-        "Expected packet size: "
+        "[UDP] Expected packet size: "
     );
 
     Serial.print(
@@ -99,9 +121,9 @@ void UDPServer::loop()
     if (packetSize <= 0)
         return;
 
-    packetsReceived_++;
+    ++packetsReceived_;
 
-    processPacket();
+    processPacket(packetSize);
 }
 
 
@@ -109,64 +131,143 @@ void UDPServer::loop()
 // Process packet
 // ============================================================
 
-void UDPServer::processPacket()
+void UDPServer::processPacket(int packetSize)
 {
-    uint8_t buffer[
-        UDPCrypto::PACKET_SIZE
-    ];
-
-    const int packetSize =
-        udp_.read(
-            buffer,
-            sizeof(buffer)
-        );
-
-    if (packetSize !=
-        static_cast<int>(
-            UDPCrypto::PACKET_SIZE))
-    {
-        Serial.printf(
-            "UDP: invalid packet size: %d "
-            "(expected %u)\n",
-            packetSize,
-            static_cast<unsigned int>(
-                UDPCrypto::PACKET_SIZE
-            )
-        );
-
-        packetsRejected_++;
-
-        return;
-    }
-
     const IPAddress remoteIP =
         udp_.remoteIP();
 
     const uint16_t remotePort =
         udp_.remotePort();
 
-    UDPCrypto::Packet packet;
 
-    if (!crypto_.decrypt(
-            buffer,
-            packetSize,
-            packet))
+    // -------------------------------------------------------------------------
+    // Validate packet size
+    // -------------------------------------------------------------------------
+
+    if (
+        packetSize !=
+        static_cast<int>(
+            UDPCrypto::PACKET_SIZE
+        )
+    )
     {
-        Serial.print(
-            "UDP: authentication/decryption "
-            "failed from "
+        Serial.printf(
+            "[UDP] Rejected packet from %s:%u: "
+            "invalid size %d bytes "
+            "(expected %u)\n",
+
+            remoteIP.toString().c_str(),
+
+            static_cast<unsigned int>(
+                remotePort
+            ),
+
+            packetSize,
+
+            static_cast<unsigned int>(
+                UDPCrypto::PACKET_SIZE
+            )
         );
 
-        Serial.print(remoteIP);
-        Serial.print(":");
-        Serial.println(remotePort);
 
-        packetsRejected_++;
+        // Drain the datagram.
+        while (udp_.available())
+            udp_.read();
+
+
+        ++packetsRejected_;
 
         return;
     }
 
-    packetsAccepted_++;
+
+    // -------------------------------------------------------------------------
+    // Read packet
+    // -------------------------------------------------------------------------
+
+    uint8_t buffer[
+        UDPCrypto::PACKET_SIZE
+    ];
+
+
+    const int bytesRead =
+        udp_.read(
+            buffer,
+            sizeof(buffer)
+        );
+
+
+    if (
+        bytesRead !=
+        static_cast<int>(
+            UDPCrypto::PACKET_SIZE
+        )
+    )
+    {
+        Serial.printf(
+            "[UDP] Rejected packet from %s:%u: "
+            "read %d bytes "
+            "(expected %u)\n",
+
+            remoteIP.toString().c_str(),
+
+            static_cast<unsigned int>(
+                remotePort
+            ),
+
+            bytesRead,
+
+            static_cast<unsigned int>(
+                UDPCrypto::PACKET_SIZE
+            )
+        );
+
+
+        ++packetsRejected_;
+
+        return;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Decrypt and authenticate
+    // -------------------------------------------------------------------------
+
+    UDPCrypto::Packet packet;
+
+
+    if (
+        !crypto_.decrypt(
+            buffer,
+            bytesRead,
+            packet
+        )
+    )
+    {
+        Serial.printf(
+            "[UDP] Rejected packet from %s:%u: "
+            "authentication/decryption failed\n",
+
+            remoteIP.toString().c_str(),
+
+            static_cast<unsigned int>(
+                remotePort
+            )
+        );
+
+
+        ++packetsRejected_;
+
+        return;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Accepted
+    // -------------------------------------------------------------------------
+
+    ++packetsAccepted_;
+
 
     printPacket(
         packet,
@@ -188,8 +289,10 @@ void UDPServer::printPacket(
     const UDPProtocol::P1Metrics& m =
         packet.metrics;
 
+
     Serial.printf(
-        "UDP: device=%s "
+        "[UDP] Packet accepted: "
+        "device=%s "
         "seq=%llu "
         "timestamp=%llu ms "
         "from=%s:%u\n",
@@ -206,11 +309,14 @@ void UDPServer::printPacket(
 
         remoteIP.toString().c_str(),
 
-        remotePort
+        static_cast<unsigned int>(
+            remotePort
+        )
     );
 
+
     Serial.printf(
-        "     energy: "
+        "      energy: "
         "import_t1=%.3f kWh "
         "import_t2=%.3f kWh "
         "export_t1=%.3f kWh "
@@ -222,8 +328,9 @@ void UDPServer::printPacket(
         m.exportedEnergyTariff2
     );
 
+
     Serial.printf(
-        "     power: "
+        "      power: "
         "import=%.3f kW "
         "export=%.3f kW "
         "net=%.3f kW\n",
@@ -233,8 +340,9 @@ void UDPServer::printPacket(
         m.netPower
     );
 
+
     Serial.printf(
-        "     voltage: "
+        "      voltage: "
         "L1=%.1f V "
         "L2=%.1f V "
         "L3=%.1f V\n",
@@ -244,8 +352,9 @@ void UDPServer::printPacket(
         m.voltagePhase3
     );
 
+
     Serial.printf(
-        "     current: "
+        "      current: "
         "L1=%.1f A "
         "L2=%.1f A "
         "L3=%.1f A\n",

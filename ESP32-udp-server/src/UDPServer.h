@@ -26,7 +26,7 @@ public:
     uint32_t packetsRejected() const;
 
 private:
-    void processPacket();
+    void processPacket(int packetSize);
 
     void printPacket(
         const UDPCrypto::Packet& packet,

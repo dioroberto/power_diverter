@@ -49,11 +49,12 @@ void MQTTClient::begin()
     if (_started)
         return;
 
-    _started = true;
 
+    _started = true;
     _state = State::WAITING_FOR_WEBSOCKET;
     _mqttSessionValid = false;
     _nextMqttConnect = 0;
+
 
     Serial.println();
     Serial.println("==================================");
@@ -111,6 +112,9 @@ void MQTTClient::begin()
 
     // -------------------------------------------------------------------------
     // WebSocket Secure
+    //
+    // This is initialized exactly once.
+    // The WebSocket library is responsible for reconnecting the transport.
     // -------------------------------------------------------------------------
 
     _webSocket.beginSSL(
@@ -142,6 +146,7 @@ void MQTTClient::begin()
         10000     // timeout ms
     );
 
+
     Serial.println("MQTT client started");
     Serial.println("Waiting for WebSocket connection...");
 }
@@ -158,30 +163,22 @@ void MQTTClient::loop()
 
 
     // -------------------------------------------------------------------------
-    // Keep WebSocket transport alive.
-    // This also handles automatic WebSocket reconnects.
+    // Always service the WebSocket transport.
+    //
+    // This must continue running even when Wi-Fi is temporarily unavailable.
+    // The WebSocket library handles its own reconnect attempts.
     // -------------------------------------------------------------------------
 
     _webSocket.loop();
 
 
     // -------------------------------------------------------------------------
-    // Process MQTT traffic only while the current MQTT session is valid.
-    //
-    // Do not allow a stale MQTT session to send packets over a newly
-    // established WebSocket.
-    // -------------------------------------------------------------------------
-
-    if (_webSocket.isConnected() && _mqttSessionValid)
-    {
-        _mqtt.update();
-    }
-
-
-    // -------------------------------------------------------------------------
-    // WebSocket is not connected.
+    // WebSocket transport unavailable.
     //
     // There cannot be a valid MQTT session without the WebSocket transport.
+    //
+    // IMPORTANT:
+    // Do NOT call _mqtt.disconnect() here. The transport may already be gone.
     // -------------------------------------------------------------------------
 
     if (!_webSocket.isConnected())
@@ -204,9 +201,9 @@ void MQTTClient::loop()
 
 
     // -------------------------------------------------------------------------
-    // WebSocket is connected but MQTT session is not valid.
+    // WebSocket is connected.
     //
-    // A fresh MQTT CONNECT is mandatory.
+    // A newly established WebSocket always requires a new MQTT CONNECT.
     // -------------------------------------------------------------------------
 
     if (!_mqttSessionValid)
@@ -221,20 +218,29 @@ void MQTTClient::loop()
             Serial.println("MQTT session requires CONNECT");
         }
 
+
         if (!reconnectDue())
             return;
 
+
         connectMqtt();
+
         return;
     }
 
 
     // -------------------------------------------------------------------------
-    // MQTT session is active.
+    // Current MQTT session is valid.
+    //
+    // Process MQTT traffic only while both layers agree that the connection
+    // is active.
     // -------------------------------------------------------------------------
 
     if (_mqtt.isConnected())
     {
+        _mqtt.update();
+
+
         if (_state != State::CONNECTED)
         {
             _state = State::CONNECTED;
@@ -252,8 +258,8 @@ void MQTTClient::loop()
     // -------------------------------------------------------------------------
     // Defensive recovery.
     //
-    // The MQTT library says it is no longer connected even though our session
-    // flag was still valid. Invalidate everything and reconnect cleanly.
+    // The MQTT library no longer considers the session connected although
+    // the WebSocket transport is still alive.
     // -------------------------------------------------------------------------
 
     Serial.println();
@@ -273,10 +279,11 @@ void MQTTClient::loop()
 
 bool MQTTClient::connected()
 {
-    return _started &&
-           _webSocket.isConnected() &&
-           _mqttSessionValid &&
-           _mqtt.isConnected();
+    return
+        _started &&
+        _webSocket.isConnected() &&
+        _mqttSessionValid &&
+        _mqtt.isConnected();
 }
 
 
@@ -301,7 +308,7 @@ bool MQTTClient::connect()
 
 
     // -------------------------------------------------------------------------
-    // A valid MQTT session already exists.
+    // Already connected.
     // -------------------------------------------------------------------------
 
     if (connected())
@@ -312,7 +319,7 @@ bool MQTTClient::connect()
 
 
     // -------------------------------------------------------------------------
-    // WebSocket must exist before MQTT can connect.
+    // WebSocket transport must exist first.
     // -------------------------------------------------------------------------
 
     if (!_webSocket.isConnected())
@@ -328,7 +335,7 @@ bool MQTTClient::connect()
 
 
     // -------------------------------------------------------------------------
-    // A new MQTT session is required.
+    // Force a completely new MQTT session.
     // -------------------------------------------------------------------------
 
     invalidateMqttSession();
@@ -348,16 +355,13 @@ void MQTTClient::configureLastWill()
 
 
     // -------------------------------------------------------------------------
-    // MQTT Last Will and Testament
+    // Configure Last Will before every MQTT CONNECT.
     //
-    // If the connection is lost unexpectedly, the broker publishes:
+    // Unexpected loss:
     //
-    //     topic:   <device>/availability
-    //     payload: offline
-    //     retain:  true
-    //     QoS:     0
+    //     <device>/availability = offline
     //
-    // The will is configured before every CONNECT attempt.
+    // Normal DISCONNECT does not trigger the Last Will.
     // -------------------------------------------------------------------------
 
     _mqtt.setWill(
@@ -380,7 +384,7 @@ bool MQTTClient::connectMqtt()
 
 
     // -------------------------------------------------------------------------
-    // WebSocket must be connected.
+    // WebSocket transport must be connected.
     // -------------------------------------------------------------------------
 
     if (!_webSocket.isConnected())
@@ -391,7 +395,7 @@ bool MQTTClient::connectMqtt()
 
 
     // -------------------------------------------------------------------------
-    // A valid MQTT session already exists.
+    // Already connected.
     // -------------------------------------------------------------------------
 
     if (_mqttSessionValid && _mqtt.isConnected())
@@ -402,10 +406,9 @@ bool MQTTClient::connectMqtt()
 
 
     // -------------------------------------------------------------------------
-    // Make absolutely sure that an old MQTT session cannot survive onto
-    // the new WebSocket connection.
+    // Clear stale MQTT library state.
     //
-    // This is the important recovery path for broker restarts.
+    // This is only done while the WebSocket transport is still alive.
     // -------------------------------------------------------------------------
 
     if (_mqtt.isConnected())
@@ -421,7 +424,7 @@ bool MQTTClient::connectMqtt()
 
 
     // -------------------------------------------------------------------------
-    // Connection attempt
+    // MQTT CONNECT
     // -------------------------------------------------------------------------
 
     Serial.println();
@@ -436,14 +439,14 @@ bool MQTTClient::connectMqtt()
 
 
     // -------------------------------------------------------------------------
-    // Configure Last Will BEFORE MQTT CONNECT.
+    // Last Will must be configured before CONNECT.
     // -------------------------------------------------------------------------
 
     configureLastWill();
 
 
     // -------------------------------------------------------------------------
-    // Device name is deliberately used as MQTT client ID.
+    // Device name is the MQTT client ID.
     // -------------------------------------------------------------------------
 
     const bool result =
@@ -455,7 +458,7 @@ bool MQTTClient::connectMqtt()
 
 
     // -------------------------------------------------------------------------
-    // Connection successful
+    // CONNECT successful.
     // -------------------------------------------------------------------------
 
     if (result)
@@ -463,6 +466,7 @@ bool MQTTClient::connectMqtt()
         _mqttSessionValid = true;
         _state = State::CONNECTED;
         _nextMqttConnect = 0;
+
 
         Serial.println();
         Serial.println("==================================");
@@ -482,14 +486,14 @@ bool MQTTClient::connectMqtt()
 
 
         // ---------------------------------------------------------------------
-        // Clean session is enabled, therefore subscriptions must be restored.
+        // Clean MQTT sessions do not retain subscriptions.
         // ---------------------------------------------------------------------
 
         restoreSubscriptions();
 
 
         // ---------------------------------------------------------------------
-        // Announce that the device is online.
+        // Announce online.
         // ---------------------------------------------------------------------
 
         if (publishAvailability(true))
@@ -505,12 +509,13 @@ bool MQTTClient::connectMqtt()
             );
         }
 
+
         return true;
     }
 
 
     // -------------------------------------------------------------------------
-    // Connection failed
+    // CONNECT failed.
     // -------------------------------------------------------------------------
 
     _mqttSessionValid = false;
@@ -552,21 +557,15 @@ void MQTTClient::invalidateMqttSession()
         );
     }
 
-    _mqttSessionValid = false;
-
 
     // -------------------------------------------------------------------------
-    // If the MQTT library still thinks it is connected, clear that state too.
+    // Do not send MQTT DISCONNECT here.
     //
-    // This is important when the WebSocket was recreated after a broker
-    // restart. We must not allow the first packet on the new connection to
-    // be a PUBLISH.
+    // This function is also called after WebSocket loss, where the transport
+    // may already be gone.
     // -------------------------------------------------------------------------
 
-    if (_mqtt.isConnected())
-    {
-        _mqtt.disconnect();
-    }
+    _mqttSessionValid = false;
 }
 
 
@@ -591,7 +590,9 @@ bool MQTTClient::reconnectDue() const
     if (_nextMqttConnect == 0)
         return true;
 
+
     const unsigned long now = millis();
+
 
     return static_cast<long>(
         now - _nextMqttConnect
@@ -619,17 +620,23 @@ void MQTTClient::disconnect()
     if (!_started)
         return;
 
+
     Serial.println();
     Serial.println("MQTT disconnect");
 
 
     // -------------------------------------------------------------------------
-    // Normal MQTT DISCONNECT does NOT trigger the Last Will.
-    // Therefore "offline" is not published here.
+    // This is an intentional shutdown.
+    //
+    // Unlike invalidateMqttSession(), the transport is expected to be alive,
+    // so sending MQTT DISCONNECT is appropriate.
     // -------------------------------------------------------------------------
 
-    if (_mqtt.isConnected())
+    if (_webSocket.isConnected() && _mqtt.isConnected())
+    {
         _mqtt.disconnect();
+    }
+
 
     _mqttSessionValid = false;
 
@@ -642,7 +649,7 @@ void MQTTClient::disconnect()
 
 
     // -------------------------------------------------------------------------
-    // Reset state.
+    // Reset client state.
     // -------------------------------------------------------------------------
 
     _state = State::STOPPED;
@@ -669,9 +676,7 @@ bool MQTTClient::publish(
 
 
     // -------------------------------------------------------------------------
-    // MQTT requires both a valid WebSocket transport and a valid MQTT
-    // session. This prevents PUBLISH from being sent immediately after a
-    // WebSocket reconnect.
+    // Never publish unless both transport and MQTT session are valid.
     // -------------------------------------------------------------------------
 
     if (!connected())
@@ -722,6 +727,7 @@ bool MQTTClient::publishP1Health(
 
     payload.reserve(128);
 
+
     payload += F("{\"available\":");
     payload += available ? F("true") : F("false");
 
@@ -760,6 +766,7 @@ bool MQTTClient::publishAvailability(
     const String topic =
         Settings::MQTT::Topic::AVAILABILITY();
 
+
     const char* payload =
         available
             ? "online"
@@ -790,15 +797,19 @@ bool MQTTClient::subscribe(
 
 
     // -------------------------------------------------------------------------
-    // Always remember the subscription so it can be restored after a clean
-    // MQTT session reconnect.
+    // Always remember the subscription.
+    //
+    // This allows restoreSubscriptions() to restore it after every clean
+    // MQTT session.
     // -------------------------------------------------------------------------
 
     _subscribedTopic = topic;
 
 
     // -------------------------------------------------------------------------
-    // Queue subscription until MQTT is connected.
+    // MQTT isn't connected yet.
+    //
+    // The subscription remains queued.
     // -------------------------------------------------------------------------
 
     if (!connected())
@@ -951,9 +962,10 @@ void MQTTClient::webSocketEvent(
 
 
             // -----------------------------------------------------------------
-            // The old MQTT session is no longer valid.
+            // The MQTT session is no longer valid.
             //
-            // This is critical after a broker restart.
+            // Do NOT call _mqtt.disconnect().
+            // The WebSocket may already be gone.
             // -----------------------------------------------------------------
 
             _instance->invalidateMqttSession();
@@ -961,7 +973,9 @@ void MQTTClient::webSocketEvent(
             _instance->_state =
                 State::WAITING_FOR_WEBSOCKET;
 
-            _instance->_nextMqttConnect = 0;
+            // Wait for the WebSocket layer to reconnect.
+            _instance->_nextMqttConnect =
+                0;
 
             break;
 
@@ -978,11 +992,7 @@ void MQTTClient::webSocketEvent(
 
 
             // -----------------------------------------------------------------
-            // IMPORTANT:
-            //
-            // Every WebSocket connection requires a NEW MQTT CONNECT.
-            //
-            // Never reuse an MQTT session from the previous WebSocket.
+            // Every WebSocket connection requires a new MQTT CONNECT.
             // -----------------------------------------------------------------
 
             _instance->invalidateMqttSession();
@@ -990,7 +1000,9 @@ void MQTTClient::webSocketEvent(
             _instance->_state =
                 State::CONNECTING_MQTT;
 
-            _instance->_nextMqttConnect = 0;
+            // MQTT CONNECT can happen on the next loop iteration.
+            _instance->_nextMqttConnect =
+                0;
 
             break;
 
@@ -1004,12 +1016,14 @@ void MQTTClient::webSocketEvent(
             Serial.println();
             Serial.println("[WS] ERROR");
 
+
             _instance->invalidateMqttSession();
 
             _instance->_state =
                 State::WAITING_FOR_WEBSOCKET;
 
-            _instance->_nextMqttConnect = 0;
+            _instance->_nextMqttConnect =
+                0;
 
             break;
 

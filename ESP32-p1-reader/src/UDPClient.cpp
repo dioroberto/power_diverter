@@ -1,14 +1,15 @@
 #include "UDPClient.h"
 
+#include <ESPmDNS.h>
+
 #include "UDPProtocol.h"
-#include "secrets.h"
 #include "secrets_udp.h"
 #include "udp_config.h"
 
 
-// ============================================================
+// =============================================================================
 // Constructor
-// ============================================================
+// =============================================================================
 
 UDPClient::UDPClient(
     const char* hostname,
@@ -19,50 +20,58 @@ UDPClient::UDPClient(
       serverIP_(INADDR_NONE),
       mdnsAvailable_(false),
       ready_(false),
-      lastResolve_(0)
+      lastResolve_(0),
+      sequence_(0)
 {
 }
 
 
-// ============================================================
+// =============================================================================
 // Begin
-// ============================================================
+// =============================================================================
 
-bool UDPClient::begin(bool mdnsAvailable)
+bool UDPClient::begin(
+    bool mdnsAvailable
+)
 {
-    mdnsAvailable_ = mdnsAvailable;
+    // -------------------------------------------------------------------------
+    // Reset runtime state
+    // -------------------------------------------------------------------------
 
+    mdnsAvailable_ = mdnsAvailable;
     ready_ = false;
     serverIP_ = INADDR_NONE;
 
-    lastResolve_ = millis();
+    // Allow an immediate resolution attempt.
+    lastResolve_ = 0;
 
 
-    // --------------------------------------------------------
-    // Start local UDP socket.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Start UDP socket
+    // -------------------------------------------------------------------------
 
     if (!udp_.begin(0))
     {
         Serial.println(
-            "UDP: failed to start socket."
+            "[UDP] ERROR: Failed to start socket."
         );
 
         return false;
     }
 
 
-    // --------------------------------------------------------
-    // Initialise cryptography.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Initialize cryptography
+    // -------------------------------------------------------------------------
 
     if (!crypto_.begin(
             SecretsUDP::UDP::DEVICE_PRIVATE_KEY,
             SecretsUDP::UDP::SERVER_PUBLIC_KEY,
-            UDPConfig::DEVICE_NAME))
+            UDPConfig::DEVICE_NAME
+        ))
     {
         Serial.println(
-            "UDP: crypto initialization failed."
+            "[UDP] ERROR: Crypto initialization failed."
         );
 
         return false;
@@ -70,17 +79,17 @@ bool UDPClient::begin(bool mdnsAvailable)
 
 
     Serial.println(
-        "UDP: client started."
+        "[UDP] Client started."
     );
 
     Serial.println(
-        "UDP: encryption enabled."
+        "[UDP] Encryption enabled."
     );
 
 
-    // --------------------------------------------------------
-    // Initial resolution.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Initial server resolution
+    // -------------------------------------------------------------------------
 
     if (mdnsAvailable_)
     {
@@ -89,8 +98,8 @@ bool UDPClient::begin(bool mdnsAvailable)
     else
     {
         Serial.println(
-            "UDP: mDNS unavailable; "
-            "destination cannot currently be resolved."
+            "[UDP] mDNS unavailable; "
+            "destination will be resolved when mDNS becomes available."
         );
     }
 
@@ -99,23 +108,67 @@ bool UDPClient::begin(bool mdnsAvailable)
 }
 
 
-// ============================================================
+// =============================================================================
+// mDNS state
+// =============================================================================
+
+void UDPClient::setMDNSAvailable(
+    bool available
+)
+{
+    // -------------------------------------------------------------------------
+    // No state change
+    // -------------------------------------------------------------------------
+
+    if (mdnsAvailable_ == available)
+        return;
+
+
+    mdnsAvailable_ = available;
+
+
+    // -------------------------------------------------------------------------
+    // mDNS lost
+    // -------------------------------------------------------------------------
+
+    if (!available)
+    {
+        Serial.println(
+            "[UDP] mDNS unavailable."
+        );
+
+        markUnavailable();
+
+        return;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // mDNS restored
+    // -------------------------------------------------------------------------
+
+    Serial.println(
+        "[UDP] mDNS available."
+    );
+
+
+    // Force an immediate resolution attempt.
+    lastResolve_ = 0;
+}
+
+
+// =============================================================================
 // Loop
-// ============================================================
+// =============================================================================
 
 void UDPClient::loop()
 {
-    // --------------------------------------------------------
-    // If mDNS is unavailable, there is nothing to resolve.
-    //
-    // Importantly, this does NOT disable the UDP socket.
-    // --------------------------------------------------------
-
     if (!mdnsAvailable_)
         return;
 
 
-    const uint32_t now = millis();
+    const uint32_t now =
+        millis();
 
 
     const uint32_t interval =
@@ -124,8 +177,14 @@ void UDPClient::loop()
             : RESOLVE_INTERVAL_MS;
 
 
-    if ((now - lastResolve_) < interval)
+    if (
+        static_cast<uint32_t>(
+            now - lastResolve_
+        ) < interval
+    )
+    {
         return;
+    }
 
 
     lastResolve_ = now;
@@ -134,9 +193,9 @@ void UDPClient::loop()
 }
 
 
-// ============================================================
+// =============================================================================
 // Resolve server
-// ============================================================
+// =============================================================================
 
 bool UDPClient::resolveServer()
 {
@@ -145,7 +204,7 @@ bool UDPClient::resolveServer()
 
 
     Serial.printf(
-        "UDP: resolving %s...\n",
+        "[UDP] Resolving %s...\n",
         hostname_
     );
 
@@ -154,12 +213,16 @@ bool UDPClient::resolveServer()
         MDNS.queryHost(hostname_);
 
 
+    // -------------------------------------------------------------------------
+    // Resolution failed
+    // -------------------------------------------------------------------------
+
     if (resolved == INADDR_NONE)
     {
         markUnavailable();
 
         Serial.printf(
-            "UDP: server %s unavailable.\n",
+            "[UDP] Server %s unavailable.\n",
             hostname_
         );
 
@@ -167,25 +230,40 @@ bool UDPClient::resolveServer()
     }
 
 
+    // -------------------------------------------------------------------------
+    // Check whether the address changed
+    // -------------------------------------------------------------------------
+
     const bool addressChanged =
         !ready_ ||
         serverIP_ != resolved;
 
 
+    // -------------------------------------------------------------------------
+    // Store destination
+    // -------------------------------------------------------------------------
+
     serverIP_ = resolved;
     ready_ = true;
 
 
+    // -------------------------------------------------------------------------
+    // Report new destination
+    // -------------------------------------------------------------------------
+
     if (addressChanged)
     {
+        const String address =
+            serverIP_.toString();
+
         Serial.printf(
-            "UDP: server resolved: %s\n",
-            serverIP_.toString().c_str()
+            "[UDP] Server resolved: %s\n",
+            address.c_str()
         );
 
         Serial.printf(
-            "UDP: destination %s:%u\n",
-            serverIP_.toString().c_str(),
+            "[UDP] Destination: %s:%u\n",
+            address.c_str(),
             static_cast<unsigned int>(port_)
         );
     }
@@ -195,9 +273,9 @@ bool UDPClient::resolveServer()
 }
 
 
-// ============================================================
-// Mark unavailable
-// ============================================================
+// =============================================================================
+// Mark destination unavailable
+// =============================================================================
 
 void UDPClient::markUnavailable()
 {
@@ -206,39 +284,33 @@ void UDPClient::markUnavailable()
 }
 
 
-// ============================================================
+// =============================================================================
 // Send P1 metrics
-// ============================================================
+// =============================================================================
 
 void UDPClient::sendMetrics(
     const P1Reader& p1Reader
 )
 {
-    // --------------------------------------------------------
-    // No destination IP.
-    //
-    // Do NOT attempt to send.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Destination unavailable
+    // -------------------------------------------------------------------------
 
     if (!ready_)
     {
         Serial.println(
-            "UDP: no destination; packet skipped."
+            "[UDP] No destination; packet skipped."
         );
 
         return;
     }
 
 
-    // --------------------------------------------------------
-    // Build shared P1 metrics structure.
-    //
-    // This structure is defined in UDPProtocol.h and is also
-    // used by the UDP receiver.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Build P1 metrics
+    // -------------------------------------------------------------------------
 
     UDPProtocol::P1Metrics metrics{};
-
 
     metrics.importedEnergyTariff1 =
         p1Reader.importedEnergyTariff1();
@@ -283,87 +355,67 @@ void UDPClient::sendMetrics(
         p1Reader.currentPhase3();
 
 
-    // --------------------------------------------------------
-    // Sequence.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Sequence
+    // -------------------------------------------------------------------------
 
-    static uint64_t sequence = 0;
-
-    ++sequence;
+    ++sequence_;
 
 
-    // --------------------------------------------------------
-    // Monotonic device timestamp.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Monotonic device timestamp
+    // -------------------------------------------------------------------------
 
     const uint64_t timestamp =
         static_cast<uint64_t>(millis());
 
 
-    // --------------------------------------------------------
-    // Allocate complete encrypted packet.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Encrypted packet
+    // -------------------------------------------------------------------------
 
-    uint8_t packet[UDPCrypto::PACKET_SIZE];
+    uint8_t packet[
+        UDPCrypto::PACKET_SIZE
+    ];
 
-
-    // --------------------------------------------------------
-    // Encrypt.
-    // --------------------------------------------------------
 
     if (!crypto_.encrypt(
-            sequence,
+            sequence_,
             timestamp,
             reinterpret_cast<const uint8_t*>(&metrics),
             sizeof(metrics),
             packet,
-            sizeof(packet)))
+            sizeof(packet)
+        ))
     {
         Serial.println(
-            "UDP: encryption failed."
+            "[UDP] ERROR: Encryption failed."
         );
 
         return;
     }
 
 
-    // --------------------------------------------------------
-    // Sanity check.
-    // --------------------------------------------------------
-
-    if (sizeof(packet) != UDPCrypto::PACKET_SIZE)
-    {
-        Serial.println(
-            "UDP: internal packet size error."
-        );
-
-        return;
-    }
-
-
-    // --------------------------------------------------------
-    // Begin packet.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Start UDP packet
+    // -------------------------------------------------------------------------
 
     if (!udp_.beginPacket(
             serverIP_,
-            port_))
+            port_
+        ))
     {
         Serial.println(
-            "UDP: beginPacket() failed."
+            "[UDP] ERROR: beginPacket() failed."
         );
 
-        // Keep the resolved address.
-        //
-        // A failed send does NOT prove that DNS/mDNS
-        // resolution is wrong.
         return;
     }
 
 
-    // --------------------------------------------------------
-    // Write packet.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Write encrypted packet
+    // -------------------------------------------------------------------------
 
     const size_t written =
         udp_.write(
@@ -375,45 +427,44 @@ void UDPClient::sendMetrics(
     if (written != sizeof(packet))
     {
         Serial.printf(
-            "UDP: write failed: %u/%u bytes\n",
+            "[UDP] ERROR: write failed: %u/%u bytes\n",
             static_cast<unsigned int>(written),
             static_cast<unsigned int>(sizeof(packet))
         );
 
-        // Finish/cancel current packet.
         udp_.endPacket();
 
         return;
     }
 
 
-    // --------------------------------------------------------
-    // Send.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Send packet
+    // -------------------------------------------------------------------------
 
     if (!udp_.endPacket())
     {
         Serial.println(
-            "UDP: endPacket() failed."
+            "[UDP] ERROR: endPacket() failed."
         );
 
         return;
     }
 
 
-    // --------------------------------------------------------
-    // Diagnostic.
-    // --------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Diagnostic
+    // -------------------------------------------------------------------------
 
     Serial.printf(
-        "UDP: encrypted P1 packet sent: "
+        "[UDP] Encrypted P1 packet sent: "
         "%u bytes, "
         "sequence=%llu, "
         "import=%.3f W, "
         "export=%.3f W, "
         "net=%.3f W\n",
         static_cast<unsigned int>(sizeof(packet)),
-        static_cast<unsigned long long>(sequence),
+        static_cast<unsigned long long>(sequence_),
         metrics.importedPower,
         metrics.exportedPower,
         metrics.netPower
@@ -421,9 +472,9 @@ void UDPClient::sendMetrics(
 }
 
 
-// ============================================================
+// =============================================================================
 // Status
-// ============================================================
+// =============================================================================
 
 bool UDPClient::ready() const
 {
@@ -431,9 +482,9 @@ bool UDPClient::ready() const
 }
 
 
-// ============================================================
+// =============================================================================
 // Server IP
-// ============================================================
+// =============================================================================
 
 IPAddress UDPClient::serverIP() const
 {

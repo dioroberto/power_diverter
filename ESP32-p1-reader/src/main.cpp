@@ -1,47 +1,61 @@
 #include <Arduino.h>
-#include <WiFi.h>
 #include <ESPmDNS.h>
 #include <RNG.h>
 
 #include "settings.h"
 #include "secrets.h"
 #include "secrets_udp.h"
-#include "provisioner.h"
 #include "P1Reader.h"
 #include "UDPClient.h"
 #include "MQTTClient.h"
 #include "UDPProtocol.h"
 #include "udp_config.h"
+#include "WiFiProvisioning.h"
 
 
 // =============================================================================
 // Application configuration
 // =============================================================================
 
-namespace App
+namespace AppConfig
 {
     constexpr uint8_t PROVISION_PIN = 27;
-
-
-    // -------------------------------------------------------------------------
-    // Runtime state
-    // -------------------------------------------------------------------------
-
-    bool haveP1Data = false;
-
-    bool mqttFirstPublishPending = false;
-
-    uint32_t lastP1TelegramMs = 0;
-
-    uint32_t lastMqttPublishMs = 0;
-
-    uint32_t lastP1HealthPublishMs = 0;
+    constexpr char WIFI_PROVISIONING_AP[] = "ESP32-P1-Setup";
 }
 
 
 // =============================================================================
-// Global clients
+// Application state
 // =============================================================================
+
+namespace App
+{
+    struct State
+    {
+        bool servicesStarted = false;
+        bool wifiConnected = false;
+        bool mdnsAvailable = false;
+
+        bool haveP1Data = false;
+        bool mqttFirstPublishPending = false;
+
+        uint32_t lastP1TelegramMs = 0;
+        uint32_t lastMqttPublishMs = 0;
+        uint32_t lastP1HealthPublishMs = 0;
+    };
+
+    State state;
+}
+
+
+// =============================================================================
+// Global services
+// =============================================================================
+
+WiFiProvisioning wifi(
+    AppConfig::WIFI_PROVISIONING_AP,
+    AppConfig::PROVISION_PIN
+);
 
 P1Reader p1Reader(
     Serial2,
@@ -51,12 +65,10 @@ P1Reader p1Reader(
     Settings::P1::TELEGRAM_TIMEOUT_MS
 );
 
-
 UDPClient udpClient(
     UDPConfig::SERVER_NAME,
     UDPConfig::SERVER_PORT
 );
-
 
 MQTTClient mqttClient(
     Settings::MQTT::HOST,
@@ -70,150 +82,190 @@ MQTTClient mqttClient(
 
 
 // =============================================================================
+// Forward declarations
+// =============================================================================
+
+// Wi-Fi / network
+void startWiFi();
+void processWiFi();
+
+bool startMDNS();
+void stopMDNS();
+
+// Services
+void startServices();
+void processServices();
+
+// P1
+void processP1();
+
+// MQTT
+void processMqtt();
+void processMqttData();
+void processPeriodicHealth();
+
+void onMQTTMessage(
+    const char* topic,
+    const char* payload,
+    unsigned int size
+);
+
+String buildMqttPayload();
+void publishP1Health();
+
+// JSON
+void appendJsonEscaped(
+    String& output,
+    const String& value
+);
+
+// Diagnostics
+void printConfiguration();
+
+
+// =============================================================================
 // Wi-Fi
 // =============================================================================
 
-bool setupWiFi()
+void startWiFi()
 {
-    char ssid[32] = {};
-    char pass[64] = {};
+    Serial.println();
+    Serial.println("[WiFi] Starting...");
 
-
-    // -------------------------------------------------------------------------
-    // Provisioning input
-    // -------------------------------------------------------------------------
-
-    pinMode(
-        App::PROVISION_PIN,
-        INPUT_PULLUP
-    );
-
-
-    // -------------------------------------------------------------------------
-    // Determine credentials
-    // -------------------------------------------------------------------------
-
-    if (digitalRead(App::PROVISION_PIN) == LOW)
-    {
-        Serial.println();
-        Serial.println(
-            "[WiFi] GPIO27 LOW: forcing provisioning."
-        );
-
-
-        WiFi.disconnect(true);
-
-
-        provisioner.clear_creds();
-
-
-        while (!provisioner.provision(ssid, pass))
-        {
-            Serial.println(
-                "[WiFi] Provisioning failed. Retrying..."
-            );
-        }
-
-
-        Serial.println(
-            "[WiFi] Provisioning successful."
-        );
-    }
-    else
-    {
-        Serial.println(
-            "[WiFi] GPIO27 HIGH: using stored credentials."
-        );
-
-
-        if (!provisioner.get_creds(ssid, pass))
-        {
-            Serial.println(
-                "[WiFi] No stored Wi-Fi credentials."
-            );
-
-
-            while (!provisioner.provision(ssid, pass))
-            {
-                Serial.println(
-                    "[WiFi] Provisioning failed. Retrying..."
-                );
-            }
-        }
-    }
-
-
-    // -------------------------------------------------------------------------
-    // Configure station
-    // -------------------------------------------------------------------------
-
-    WiFi.mode(WIFI_STA);
-
-
-    WiFi.setHostname(
+    wifi.setHostname(
         UDPConfig::DEVICE_NAME
     );
 
-
-    // -------------------------------------------------------------------------
-    // Connect
-    // -------------------------------------------------------------------------
-
-    Serial.println();
-
-    Serial.print(
-        "[WiFi] Connecting to: "
-    );
-
-    Serial.println(
-        ssid
-    );
-
-
-    WiFi.begin(
-        ssid,
-        pass
-    );
-
-
-    while (WiFi.status() != WL_CONNECTED)
+    if (!wifi.begin())
     {
-        delay(250);
+        Serial.println(
+            "[WiFi] Not connected yet."
+        );
 
-        Serial.print(".");
+        Serial.println(
+            "[WiFi] Waiting for connection..."
+        );
+
+        return;
     }
 
-
-    Serial.println();
+    App::state.wifiConnected = true;
 
     Serial.println(
         "[WiFi] Connected."
     );
 
-
     Serial.print(
-        "[WiFi] IP address: "
+        "[WiFi] IP: "
     );
 
     Serial.println(
-        WiFi.localIP()
+        wifi.localIP()
     );
+}
 
 
-    Serial.print(
-        "[WiFi] RSSI: "
-    );
+void processWiFi()
+{
+    wifi.loop();
 
-    Serial.print(
-        WiFi.RSSI()
-    );
-
-    Serial.println(
-        " dBm"
-    );
+    const bool connected =
+        wifi.connected();
 
 
-    return true;
+    // -------------------------------------------------------------------------
+    // Wi-Fi connected
+    // -------------------------------------------------------------------------
+
+    if (connected && !App::state.wifiConnected)
+    {
+        App::state.wifiConnected = true;
+
+        Serial.println();
+        Serial.println(
+            "[WiFi] Connected."
+        );
+
+        Serial.print(
+            "[WiFi] IP: "
+        );
+
+        Serial.println(
+            wifi.localIP()
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Start services after first connection
+    // -------------------------------------------------------------------------
+
+    if (
+        connected &&
+        !App::state.servicesStarted
+    )
+    {
+        startServices();
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Wi-Fi lost
+    // -------------------------------------------------------------------------
+
+    if (
+        !connected &&
+        App::state.wifiConnected
+    )
+    {
+        App::state.wifiConnected = false;
+
+        Serial.println();
+        Serial.println(
+            "[WiFi] Connection lost."
+        );
+
+        if (App::state.servicesStarted)
+        {
+            Serial.println(
+                "[APP] Existing services remain running."
+            );
+
+            Serial.println(
+                "[APP] Waiting for Wi-Fi recovery..."
+            );
+
+            stopMDNS();
+
+            udpClient.setMDNSAvailable(
+                false
+            );
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Wi-Fi recovered
+    // -------------------------------------------------------------------------
+
+    if (
+        connected &&
+        App::state.servicesStarted &&
+        !App::state.mdnsAvailable
+    )
+    {
+        Serial.println();
+        Serial.println(
+            "[WiFi] Network recovered."
+        );
+
+        const bool mdnsReady =
+            startMDNS();
+
+        udpClient.setMDNSAvailable(
+            mdnsReady
+        );
+    }
 }
 
 
@@ -221,14 +273,15 @@ bool setupWiFi()
 // mDNS
 // =============================================================================
 
-bool setupMDNS()
+bool startMDNS()
 {
-    Serial.println();
+    if (App::state.mdnsAvailable)
+        return true;
 
+    Serial.println();
     Serial.println(
         "[mDNS] Starting..."
     );
-
 
     if (!MDNS.begin(UDPConfig::DEVICE_NAME))
     {
@@ -236,9 +289,12 @@ bool setupMDNS()
             "[mDNS] ERROR: Failed to start responder."
         );
 
+        App::state.mdnsAvailable = false;
+
         return false;
     }
 
+    App::state.mdnsAvailable = true;
 
     Serial.print(
         "[mDNS] Local hostname: "
@@ -252,8 +308,278 @@ bool setupMDNS()
         ".local"
     );
 
-
     return true;
+}
+
+
+void stopMDNS()
+{
+    if (!App::state.mdnsAvailable)
+        return;
+
+    Serial.println(
+        "[mDNS] Stopping..."
+    );
+
+    MDNS.end();
+
+    App::state.mdnsAvailable = false;
+}
+
+
+// =============================================================================
+// Service startup
+// =============================================================================
+//
+// Services are initialized exactly once.
+//
+// Wi-Fi must be connected before this function is called.
+//
+// A later Wi-Fi outage does not recreate the services.
+// =============================================================================
+
+void startServices()
+{
+    if (App::state.servicesStarted)
+        return;
+
+    if (!wifi.connected())
+    {
+        Serial.println(
+            "[APP] Cannot start services: "
+            "Wi-Fi not connected."
+        );
+
+        return;
+    }
+
+    Serial.println();
+    Serial.println(
+        "========================================"
+    );
+
+    Serial.println(
+        "[APP] Starting services"
+    );
+
+    Serial.println(
+        "========================================"
+    );
+
+
+    // -------------------------------------------------------------------------
+    // mDNS
+    // -------------------------------------------------------------------------
+
+    const bool mdnsReady =
+        startMDNS();
+
+    if (!mdnsReady)
+    {
+        Serial.println(
+            "[APP] WARNING: mDNS unavailable."
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
+    // UDP
+    // -------------------------------------------------------------------------
+
+    if (!udpClient.begin(mdnsReady))
+    {
+        Serial.println(
+            "[APP] ERROR: UDP client initialization failed."
+        );
+    }
+    else
+    {
+        Serial.println(
+            "[APP] UDP client started."
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
+    // P1
+    // -------------------------------------------------------------------------
+
+    p1Reader.begin();
+
+    Serial.println(
+        "[APP] P1 reader started."
+    );
+
+
+    // -------------------------------------------------------------------------
+    // MQTT
+    // -------------------------------------------------------------------------
+
+    mqttClient.setMessageCallback(
+        onMQTTMessage
+    );
+
+    mqttClient.begin();
+
+    Serial.println(
+        "[APP] MQTT client started."
+    );
+
+
+    // -------------------------------------------------------------------------
+    // Timers
+    // -------------------------------------------------------------------------
+
+    const uint32_t now =
+        millis();
+
+    App::state.lastMqttPublishMs =
+        now;
+
+    App::state.lastP1HealthPublishMs =
+        now;
+
+
+    // -------------------------------------------------------------------------
+    // Application state
+    // -------------------------------------------------------------------------
+
+    App::state.servicesStarted = true;
+
+    printConfiguration();
+
+    Serial.println(
+        "========================================"
+    );
+
+    Serial.println(
+        "[APP] DEVICE READY"
+    );
+
+    Serial.println(
+        "========================================"
+    );
+}
+
+
+// =============================================================================
+// Service processing
+// =============================================================================
+
+void processServices()
+{
+    RNG.loop();
+
+    p1Reader.loop();
+
+    udpClient.loop();
+
+    processP1();
+
+    mqttClient.loop();
+
+    processMqtt();
+
+    processPeriodicHealth();
+}
+
+
+// =============================================================================
+// P1 processing
+// =============================================================================
+//
+// P1 is the real-time path:
+//
+//     P1 telegram
+//          |
+//          +--> application state
+//          |
+//          +--> UDP
+//
+// MQTT publication is handled separately.
+// =============================================================================
+
+void processP1()
+{
+    if (!p1Reader.available())
+        return;
+
+    const uint32_t now =
+        millis();
+
+    const bool firstTelegram =
+        !App::state.haveP1Data;
+
+
+    // -------------------------------------------------------------------------
+    // Application state
+    // -------------------------------------------------------------------------
+
+    App::state.haveP1Data = true;
+
+    App::state.lastP1TelegramMs =
+        now;
+
+
+    // -------------------------------------------------------------------------
+    // Initial MQTT publication
+    // -------------------------------------------------------------------------
+
+    if (
+        firstTelegram &&
+        Settings::MQTT::PUBLISH_FIRST_TELEGRAM
+    )
+    {
+        App::state.mqttFirstPublishPending =
+            true;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // UDP
+    // -------------------------------------------------------------------------
+
+    if (udpClient.ready())
+    {
+        udpClient.sendMetrics(
+            p1Reader
+        );
+    }
+    else
+    {
+        Serial.println(
+            "[UDP] P1 received, but "
+            "destination is not ready."
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Diagnostics
+    // -------------------------------------------------------------------------
+
+    if (
+        Settings::P1::DEBUG_LEVEL >= 1
+    )
+    {
+        Serial.print(
+            "[P1] Telegram received. Values: "
+        );
+
+        Serial.println(
+            p1Reader.getValueCount()
+        );
+    }
+}
+
+
+// =============================================================================
+// MQTT processing
+// =============================================================================
+
+void processMqtt()
+{
+    processMqttData();
 }
 
 
@@ -269,21 +595,20 @@ void onMQTTMessage(
 {
     Serial.println();
     Serial.println(
-        "========================================"
-    );
-    Serial.println(
         "[MQTT] Incoming message"
     );
-    Serial.println(
-        "========================================"
+
+    Serial.print(
+        "[MQTT] Topic: "
     );
 
+    Serial.println(
+        topic
+    );
 
-    Serial.print("Topic: ");
-    Serial.println(topic);
-
-
-    Serial.print("Payload: ");
+    Serial.print(
+        "[MQTT] Payload: "
+    );
 
     Serial.printf(
         "%.*s\n",
@@ -304,10 +629,7 @@ void appendJsonEscaped(
 {
     for (size_t i = 0; i < value.length(); ++i)
     {
-        const char c = value[i];
-
-
-        switch (c)
+        switch (value[i])
         {
             case '"':
                 output += "\\\"";
@@ -338,7 +660,7 @@ void appendJsonEscaped(
                 break;
 
             default:
-                output += c;
+                output += value[i];
                 break;
         }
     }
@@ -354,26 +676,21 @@ String buildMqttPayload()
     const size_t count =
         p1Reader.getValueCount();
 
-
     String payload;
 
     payload.reserve(
         count * 40 + 4
     );
 
-
     payload += '{';
-
 
     for (size_t i = 0; i < count; ++i)
     {
-        if (i != 0)
+        if (i > 0)
             payload += ',';
-
 
         const P1Value& value =
             p1Reader.getValue(i);
-
 
         payload += '"';
 
@@ -392,208 +709,20 @@ String buildMqttPayload()
         payload += '"';
     }
 
-
     payload += '}';
-
 
     return payload;
 }
 
 
 // =============================================================================
-// Publish P1 health
-// =============================================================================
-
-void publishP1Health()
-{
-    if (!mqttClient.connected())
-        return;
-
-
-    const uint32_t now =
-        millis();
-
-
-    uint32_t telegramAge = 0;
-
-
-    if (App::haveP1Data)
-    {
-        telegramAge =
-            now - App::lastP1TelegramMs;
-    }
-
-
-    String payload;
-
-    payload.reserve(512);
-
-
-    payload += '{';
-
-
-    // -------------------------------------------------------------------------
-    // Availability
-    // -------------------------------------------------------------------------
-
-    payload += "\"available\":";
-    payload +=
-        App::haveP1Data
-            ? "true"
-            : "false";
-
-
-    // -------------------------------------------------------------------------
-    // Telegram age
-    // -------------------------------------------------------------------------
-
-    payload += ",\"telegram_age_ms\":";
-    payload += String(
-        telegramAge
-    );
-
-
-    // -------------------------------------------------------------------------
-    // Parsed values
-    // -------------------------------------------------------------------------
-
-    payload += ",\"value_count\":";
-    payload += String(
-        p1Reader.getValueCount()
-    );
-
-
-    payload += ",\"last_telegram_ms\":";
-    payload += String(
-        App::lastP1TelegramMs
-    );
-
-
-    // -------------------------------------------------------------------------
-    // Reception statistics
-    // -------------------------------------------------------------------------
-
-    payload += ",\"rx_bytes\":";
-    payload += String(
-        p1Reader.getRxByteCount()
-    );
-
-
-    payload += ",\"telegram_starts\":";
-    payload += String(
-        p1Reader.getTelegramStartCount()
-    );
-
-
-    payload += ",\"telegram_ends\":";
-    payload += String(
-        p1Reader.getTelegramEndCount()
-    );
-
-
-    // -------------------------------------------------------------------------
-    // Validation statistics
-    // -------------------------------------------------------------------------
-
-    payload += ",\"valid\":";
-    payload += String(
-        p1Reader.getValidTelegramCount()
-    );
-
-
-    payload += ",\"invalid\":";
-    payload += String(
-        p1Reader.getInvalidTelegramCount()
-    );
-
-
-    payload += ",\"crc_errors\":";
-    payload += String(
-        p1Reader.getCrcErrorCount()
-    );
-
-
-    payload += ",\"timeouts\":";
-    payload += String(
-        p1Reader.getTelegramTimeoutCount()
-    );
-
-
-    payload += ",\"overflows\":";
-    payload += String(
-        p1Reader.getBufferOverflowCount()
-    );
-
-
-    // -------------------------------------------------------------------------
-    // Current reception state
-    // -------------------------------------------------------------------------
-
-    payload += ",\"receiving\":";
-    payload +=
-        p1Reader.isReceiving()
-            ? "true"
-            : "false";
-
-
-    // -------------------------------------------------------------------------
-    // Last CRC values
-    // -------------------------------------------------------------------------
-
-    payload += ",\"last_received_crc\":\"";
-
-    payload += String(
-        p1Reader.getLastReceivedCrc(),
-        HEX
-    );
-
-    payload += '"';
-
-
-    payload += ",\"last_calculated_crc\":\"";
-
-    payload += String(
-        p1Reader.getLastCalculatedCrc(),
-        HEX
-    );
-
-    payload += '"';
-
-
-    // -------------------------------------------------------------------------
-    // Last telegram length
-    // -------------------------------------------------------------------------
-
-    payload += ",\"last_telegram_length\":";
-    payload += String(
-        p1Reader.getLastTelegramLength()
-    );
-
-
-    // -------------------------------------------------------------------------
-    // Close JSON
-    // -------------------------------------------------------------------------
-
-    payload += '}';
-
-
-    mqttClient.publish(
-        Settings::MQTT::Topic::STATUS().c_str(),
-        payload.c_str(),
-        false
-    );
-}
-
-
-// =============================================================================
-// MQTT data scheduler
+// MQTT P1 data scheduler
 // =============================================================================
 
 void processMqttData()
 {
-    if (!App::haveP1Data)
+    if (!App::state.haveP1Data)
         return;
-
 
     const uint32_t now =
         millis();
@@ -603,32 +732,30 @@ void processMqttData()
     // Initial publication
     // -------------------------------------------------------------------------
 
-    if (App::mqttFirstPublishPending)
+    if (App::state.mqttFirstPublishPending)
     {
         if (!mqttClient.connected())
             return;
 
-
-        String payload =
+        const String payload =
             buildMqttPayload();
 
-
-        if (mqttClient.publishP1(
+        if (
+            mqttClient.publishP1(
                 payload.c_str(),
-                false))
+                false
+            )
+        )
         {
-            App::mqttFirstPublishPending =
+            App::state.mqttFirstPublishPending =
                 false;
 
-
-            App::lastMqttPublishMs =
+            App::state.lastMqttPublishMs =
                 now;
-
 
             Serial.println(
                 "[MQTT] Initial P1 snapshot published."
             );
-
 
             Serial.print(
                 "[MQTT] Topic: "
@@ -639,18 +766,18 @@ void processMqttData()
             );
         }
 
-
         return;
     }
 
 
     // -------------------------------------------------------------------------
-    // Periodic publication timer
+    // Periodic publication
     // -------------------------------------------------------------------------
 
     if (
         static_cast<uint32_t>(
-            now - App::lastMqttPublishMs
+            now -
+            App::state.lastMqttPublishMs
         ) <
         Settings::MQTT::PUBLISH_INTERVAL_MS
     )
@@ -661,10 +788,10 @@ void processMqttData()
 
     // Advance timer before checking MQTT.
     //
-    // This prevents a disconnected MQTT client from causing
+    // This prevents a disconnected MQTT connection from causing
     // a tight retry loop.
 
-    App::lastMqttPublishMs =
+    App::state.lastMqttPublishMs =
         now;
 
 
@@ -679,37 +806,31 @@ void processMqttData()
     }
 
 
-    String payload =
+    const String payload =
         buildMqttPayload();
 
-
-    if (mqttClient.publishP1(
+    if (
+        mqttClient.publishP1(
             payload.c_str(),
-            false))
+            false
+        )
+    )
     {
         Serial.println();
         Serial.println(
-            "========================================"
+            "[MQTT] Periodic P1 snapshot published."
         );
-        Serial.println(
-            "[MQTT] Periodic P1 snapshot"
-        );
-        Serial.println(
-            "========================================"
-        );
-
 
         Serial.print(
-            "Topic: "
+            "[MQTT] Topic: "
         );
 
         Serial.println(
             mqttClient.p1DataTopic()
         );
 
-
         Serial.print(
-            "Payload size: "
+            "[MQTT] Payload size: "
         );
 
         Serial.print(
@@ -730,99 +851,131 @@ void processMqttData()
 
 
 // =============================================================================
-// Process P1
-// =============================================================================
-//
-// P1 is the primary real-time path:
-//
-//     P1 telegram
-//         |
-//         +--> application state
-//         |
-//         +--> UDP
-//
-// MQTT publication is deliberately not performed here.
+// P1 health publication
 // =============================================================================
 
-void processP1()
+void publishP1Health()
 {
-    if (!p1Reader.available())
+    if (!mqttClient.connected())
         return;
-
 
     const uint32_t now =
         millis();
 
+    const uint32_t telegramAge =
+        App::state.haveP1Data
+            ? now - App::state.lastP1TelegramMs
+            : 0;
 
-    const bool firstP1Telegram =
-        !App::haveP1Data;
+    String payload;
+
+    payload.reserve(512);
+
+    payload += '{';
+
+    payload += "\"available\":";
+    payload +=
+        App::state.haveP1Data
+            ? "true"
+            : "false";
+
+    payload += ",\"telegram_age_ms\":";
+    payload += String(
+        telegramAge
+    );
+
+    payload += ",\"value_count\":";
+    payload += String(
+        p1Reader.getValueCount()
+    );
+
+    payload += ",\"last_telegram_ms\":";
+    payload += String(
+        App::state.lastP1TelegramMs
+    );
+
+    payload += ",\"rx_bytes\":";
+    payload += String(
+        p1Reader.getRxByteCount()
+    );
+
+    payload += ",\"telegram_starts\":";
+    payload += String(
+        p1Reader.getTelegramStartCount()
+    );
+
+    payload += ",\"telegram_ends\":";
+    payload += String(
+        p1Reader.getTelegramEndCount()
+    );
+
+    payload += ",\"valid\":";
+    payload += String(
+        p1Reader.getValidTelegramCount()
+    );
+
+    payload += ",\"invalid\":";
+    payload += String(
+        p1Reader.getInvalidTelegramCount()
+    );
+
+    payload += ",\"crc_errors\":";
+    payload += String(
+        p1Reader.getCrcErrorCount()
+    );
+
+    payload += ",\"timeouts\":";
+    payload += String(
+        p1Reader.getTelegramTimeoutCount()
+    );
+
+    payload += ",\"overflows\":";
+    payload += String(
+        p1Reader.getBufferOverflowCount()
+    );
+
+    payload += ",\"receiving\":";
+    payload +=
+        p1Reader.isReceiving()
+            ? "true"
+            : "false";
+
+    payload += ",\"last_received_crc\":\"";
+
+    payload += String(
+        p1Reader.getLastReceivedCrc(),
+        HEX
+    );
+
+    payload += '"';
+
+    payload += ",\"last_calculated_crc\":\"";
+
+    payload += String(
+        p1Reader.getLastCalculatedCrc(),
+        HEX
+    );
+
+    payload += '"';
+
+    payload += ",\"last_telegram_length\":";
+    payload += String(
+        p1Reader.getLastTelegramLength()
+    );
+
+    payload += '}';
 
 
-    // -------------------------------------------------------------------------
-    // Update P1 state
-    // -------------------------------------------------------------------------
-
-    App::haveP1Data = true;
-
-    App::lastP1TelegramMs = now;
-
-
-    // -------------------------------------------------------------------------
-    // Schedule first MQTT publication
-    // -------------------------------------------------------------------------
-
-    if (
-        firstP1Telegram &&
-        Settings::MQTT::PUBLISH_FIRST_TELEGRAM
-    )
-    {
-        App::mqttFirstPublishPending = true;
-    }
-
-
-    // -------------------------------------------------------------------------
-    // UDP
-    // -------------------------------------------------------------------------
-    //
-    // Send the complete P1 metrics payload.
-    //
-    // UDPClient handles the case where the destination is not currently
-    // available.
-    // -------------------------------------------------------------------------
-
-    if (udpClient.ready())
-    {
-        udpClient.sendMetrics(
-            p1Reader
-        );
-    }
-    else
-    {
-        Serial.println(
-            "[UDP] P1 received, but destination is not ready."
-        );
-    }
-
-
-    // -------------------------------------------------------------------------
-    // Diagnostic
-    // -------------------------------------------------------------------------
-
-    if (Settings::P1::DEBUG_LEVEL >= 1)
-    {
-        Serial.print(
-            "[P1] Telegram received. Values: "
-        );
-
-        Serial.println(
-            p1Reader.getValueCount()
-        );
-    }
+    mqttClient.publish(
+        Settings::MQTT::Topic::STATUS().c_str(),
+        payload.c_str(),
+        false
+    );
 }
 
 
 // =============================================================================
-// Periodic P1 health
+// Periodic health scheduler
 // =============================================================================
 
 void processPeriodicHealth()
@@ -830,14 +983,13 @@ void processPeriodicHealth()
     if (!mqttClient.connected())
         return;
 
-
     const uint32_t now =
         millis();
 
-
     if (
         static_cast<uint32_t>(
-            now - App::lastP1HealthPublishMs
+            now -
+            App::state.lastP1HealthPublishMs
         ) <
         Settings::Application::STATUS_INTERVAL_MS
     )
@@ -845,10 +997,8 @@ void processPeriodicHealth()
         return;
     }
 
-
-    App::lastP1HealthPublishMs =
+    App::state.lastP1HealthPublishMs =
         now;
-
 
     publishP1Health();
 }
@@ -864,9 +1014,11 @@ void printConfiguration()
     Serial.println(
         "----------------------------------------"
     );
+
     Serial.println(
         "Configuration"
     );
+
     Serial.println(
         "----------------------------------------"
     );
@@ -876,9 +1028,45 @@ void printConfiguration()
     // Device
     // -------------------------------------------------------------------------
 
-    Serial.print("Device: ");
+    Serial.print(
+        "Device: "
+    );
+
     Serial.println(
         UDPConfig::DEVICE_NAME
+    );
+
+
+    // -------------------------------------------------------------------------
+    // Wi-Fi
+    // -------------------------------------------------------------------------
+
+    Serial.print(
+        "WiFi SSID: "
+    );
+
+    Serial.println(
+        wifi.ssid()
+    );
+
+    Serial.print(
+        "WiFi IP: "
+    );
+
+    Serial.println(
+        wifi.localIP()
+    );
+
+    Serial.print(
+        "WiFi RSSI: "
+    );
+
+    Serial.print(
+        wifi.rssi()
+    );
+
+    Serial.println(
+        " dBm"
     );
 
 
@@ -886,25 +1074,34 @@ void printConfiguration()
     // P1
     // -------------------------------------------------------------------------
 
-    Serial.print("P1 RX: ");
+    Serial.print(
+        "P1 RX: "
+    );
+
     Serial.println(
         Settings::P1::RX_PIN
     );
 
+    Serial.print(
+        "P1 TX: "
+    );
 
-    Serial.print("P1 TX: ");
     Serial.println(
         Settings::P1::TX_PIN
     );
 
+    Serial.print(
+        "P1 baudrate: "
+    );
 
-    Serial.print("P1 baudrate: ");
     Serial.println(
         Settings::P1::BAUDRATE
     );
 
+    Serial.print(
+        "P1 inverted: "
+    );
 
-    Serial.print("P1 inverted: ");
     Serial.println(
         Settings::P1::RX_INVERTED
             ? "yes"
@@ -916,47 +1113,59 @@ void printConfiguration()
     // UDP
     // -------------------------------------------------------------------------
 
-    Serial.print("UDP server: ");
+    Serial.print(
+        "UDP server: "
+    );
+
     Serial.println(
         UDPConfig::SERVER_NAME
     );
 
+    Serial.print(
+        "UDP port: "
+    );
 
-    Serial.print("UDP port: ");
     Serial.println(
         UDPConfig::SERVER_PORT
     );
 
+    Serial.print(
+        "UDP packet size: "
+    );
 
-    Serial.print("UDP packet size: ");
     Serial.println(
         UDPCrypto::PACKET_SIZE
     );
 
+    Serial.print(
+        "UDP P1 metrics size: "
+    );
 
-    Serial.print("UDP P1 metrics size: ");
     Serial.println(
         UDPProtocol::P1_METRICS_SIZE
     );
 
+    Serial.print(
+        "UDP ready: "
+    );
 
-    Serial.print("UDP ready: ");
     Serial.println(
         udpClient.ready()
             ? "yes"
             : "no"
     );
 
-
     if (udpClient.ready())
     {
-        Serial.print("UDP destination: ");
+        Serial.print(
+            "UDP destination: "
+        );
 
         Serial.print(
             udpClient.serverIP()
         );
 
-        Serial.print(":");
+        Serial.print(':');
 
         Serial.println(
             UDPConfig::SERVER_PORT
@@ -968,63 +1177,74 @@ void printConfiguration()
     // MQTT
     // -------------------------------------------------------------------------
 
-    Serial.print("MQTT server: ");
+    Serial.print(
+        "MQTT server: "
+    );
 
     Serial.print(
         Settings::MQTT::HOST
     );
 
-    Serial.print(":");
+    Serial.print(':');
 
     Serial.println(
         Settings::MQTT::PORT
     );
 
-
-    Serial.print("MQTT client ID: ");
+    Serial.print(
+        "MQTT client ID: "
+    );
 
     Serial.println(
         UDPConfig::DEVICE_NAME
     );
 
-
-    Serial.print("MQTT P1 topic: ");
+    Serial.print(
+        "MQTT P1 topic: "
+    );
 
     Serial.println(
         mqttClient.p1DataTopic()
     );
 
-
-    Serial.print("MQTT availability topic: ");
+    Serial.print(
+        "MQTT availability topic: "
+    );
 
     Serial.println(
         Settings::MQTT::Topic::AVAILABILITY()
     );
 
-
-    Serial.print("MQTT publish interval: ");
+    Serial.print(
+        "MQTT publish interval: "
+    );
 
     Serial.print(
         Settings::MQTT::PUBLISH_INTERVAL_MS /
         1000UL
     );
 
-    Serial.println(" seconds");
+    Serial.println(
+        " seconds"
+    );
 
 
     // -------------------------------------------------------------------------
     // Health
     // -------------------------------------------------------------------------
 
-    Serial.print("P1 health interval: ");
+    Serial.print(
+        "P1 health interval: "
+    );
 
     Serial.print(
         Settings::Application::STATUS_INTERVAL_MS /
         1000UL
     );
 
-    Serial.println(" seconds");
-
+    Serial.println(
+        " seconds"
+    );
 
     Serial.println();
 }
@@ -1038,162 +1258,55 @@ void setup()
 {
     Serial.begin(115200);
 
-
-    // -------------------------------------------------------------------------
-    // Give the serial monitor time to attach.
-    // -------------------------------------------------------------------------
-
     delay(
         Settings::Application::SERIAL_STARTUP_DELAY_MS
     );
 
 
     // -------------------------------------------------------------------------
-    // Startup banner
+    // Banner
     // -------------------------------------------------------------------------
 
     Serial.println();
-
     Serial.println(
         "========================================"
     );
 
     Serial.println(
-        "           ESP32 P1 GATEWAY"
+        "              P1 GATEWAY"
     );
 
     Serial.println(
         "========================================"
     );
 
-
-    Serial.print("Device: ");
+    Serial.print(
+        "Device: "
+    );
 
     Serial.println(
         UDPConfig::DEVICE_NAME
     );
 
 
-    // =========================================================================
+    // -------------------------------------------------------------------------
     // Wi-Fi
-    // =========================================================================
+    // -------------------------------------------------------------------------
 
-    if (!setupWiFi())
+    startWiFi();
+
+    Serial.println();
+    Serial.println(
+        "[APP] Startup complete."
+    );
+
+    if (!wifi.connected())
     {
         Serial.println(
-            "[APP] ERROR: Wi-Fi setup failed."
-        );
-
-        return;
-    }
-
-
-    // =========================================================================
-    // mDNS
-    // =========================================================================
-
-    const bool mdnsReady =
-        setupMDNS();
-
-
-    if (!mdnsReady)
-    {
-        Serial.println(
-            "[APP] WARNING: mDNS unavailable."
+            "[APP] Waiting for Wi-Fi before "
+            "starting services."
         );
     }
-
-
-    // =========================================================================
-    // UDP
-    // =========================================================================
-    //
-    // UDP starts independently of server availability.
-    //
-    // begin() must NOT require the remote UDP server to be online.
-    // =========================================================================
-
-    if (!udpClient.begin(mdnsReady))
-    {
-        Serial.println(
-            "[APP] ERROR: UDP client initialization failed."
-        );
-    }
-    else
-    {
-        Serial.println(
-            "[APP] UDP client started."
-        );
-    }
-
-
-    // =========================================================================
-    // P1
-    // =========================================================================
-
-    p1Reader.begin();
-
-
-    Serial.println(
-        "[APP] P1 reader started."
-    );
-
-
-    // =========================================================================
-    // MQTT
-    // =========================================================================
-
-    mqttClient.setMessageCallback(
-        onMQTTMessage
-    );
-
-
-    mqttClient.begin();
-
-
-    Serial.println(
-        "[APP] MQTT client started."
-    );
-
-
-    // =========================================================================
-    // Timers
-    // =========================================================================
-
-    const uint32_t now =
-        millis();
-
-
-    App::lastMqttPublishMs =
-        now;
-
-
-    App::lastP1HealthPublishMs =
-        now;
-
-
-    // =========================================================================
-    // Configuration
-    // =========================================================================
-
-    printConfiguration();
-
-
-    // =========================================================================
-    // Ready
-    // =========================================================================
-
-    Serial.println(
-        "========================================"
-    );
-
-    Serial.println(
-        "           DEVICE READY"
-    );
-
-    Serial.println(
-        "========================================"
-    );
 }
 
 
@@ -1203,66 +1316,10 @@ void setup()
 
 void loop()
 {
-    // =========================================================================
-    // 1. Cryptographic RNG
-    // =========================================================================
+    processWiFi();
 
-    RNG.loop();
+    if (!App::state.servicesStarted)
+        return;
 
-
-    // =========================================================================
-    // 2. P1
-    // =========================================================================
-    //
-    // Keep the meter reader serviced continuously.
-    // =========================================================================
-
-    p1Reader.loop();
-
-
-    // =========================================================================
-    // 3. UDP maintenance
-    // =========================================================================
-    //
-    // Performs:
-    //
-    //     - destination resolution
-    //     - retry resolution
-    //     - periodic re-resolution
-    //
-    // UDP does not depend on MQTT.
-    // =========================================================================
-
-    udpClient.loop();
-
-
-    // =========================================================================
-    // 4. Process completed P1 telegram
-    // =========================================================================
-
-    processP1();
-
-
-    // =========================================================================
-    // 5. MQTT transport
-    // =========================================================================
-    //
-    // Keep MQTT serviced independently from P1 and UDP.
-    // =========================================================================
-
-    mqttClient.loop();
-
-
-    // =========================================================================
-    // 6. MQTT data scheduler
-    // =========================================================================
-
-    processMqttData();
-
-
-    // =========================================================================
-    // 7. P1 health scheduler
-    // =========================================================================
-
-    processPeriodicHealth();
+    processServices();
 }
